@@ -36,8 +36,6 @@ width = 256
 mlp = Linear(output_dim, width)
 mlp @= ReLU() @ Linear(width, width)
 mlp @= ReLU() @ Linear(width, width)
-mlp @= ReLU() @ Linear(width, width)
-
 mlp @= ReLU() @ Linear(width, input_dim)
 
 print(mlp)
@@ -46,6 +44,18 @@ mlp.jit()
 
 
 from tqdm import tqdm
+
+@jax.jit
+def spec_norm(M, num_steps=20):
+    v = jax.random.normal(jax.random.PRNGKey(0), (M.shape[1],))
+    
+    for _ in range(num_steps):
+        u = M @ v
+        u = u / jnp.linalg.norm(u)
+        v = M.T @ u 
+        v = v / jnp.linalg.norm(v)
+    
+    return jnp.linalg.norm(M @ v)
 
 def mse(w, inputs, targets):
     outputs = mlp(inputs, w)
@@ -59,28 +69,51 @@ steps = 1000
 learning_rate = 0.001
 
 
-for i in [1.0, 1.25]:
+methods = ['descent']
+results = {}
 
-    key = jax.random.PRNGKey(0)
-    w = mlp.initialize(key)
+for method in methods:
+    print(f"\n=== Running method: {method} ===")
+    results[method] = {}
 
-    progress_bar = tqdm(range(steps), desc=f"Loss: {0:.4f}")
-    for step in progress_bar:
-        key = jax.random.PRNGKey(step)
-        inputs, targets = get_batch(key, batch_size)
+    for i in [1.0]:
 
-        loss, grad_w = mse_and_grad(w, inputs, targets)
-        d_w = mlp.dualize(grad_w, target_norm=i)
-        w = [weight - learning_rate * d_weight for weight, d_weight in zip(w, d_w)]
-        progress_bar.set_description(f"Loss: {loss:.4f}")
+        key = jax.random.PRNGKey(0)
+        w = mlp.initialize(key)
 
+        progress_bar = tqdm(range(steps), desc=f"{method} Loss: {0:.4f}")
+        for step in progress_bar:
+            key = jax.random.PRNGKey(step)
+            inputs, targets = get_batch(key, batch_size)
 
-    # Get predictions for test images
-    X_test = test_images.reshape(test_images.shape[0], -1)
-    test_outputs = mlp(X_test, w)
-    predicted_labels = jnp.argmax(test_outputs, axis=1)
+            loss, grad_w = mse_and_grad(w, inputs, targets)
 
-    # Calculate and print overall test accuracy
-    total_correct = (predicted_labels == test_labels).sum()
-    total_samples = len(test_labels)
-    print(f"Overall test accuracy: {100 * total_correct/total_samples:.2f}%")
+            if method == "dualize":
+                d_w = mlp.dualize(grad_w, target_norm=i)
+                w = [weight - learning_rate * d_weight for weight, d_weight in zip(w, d_w)]
+            elif method == "descent":
+                #d_w = [g / spec_norm(g) / 3 * jnp.sqrt(g.shape[0]/g.shape[1]) for g in grad_w]
+                w = [weight - learning_rate * grad for weight, grad in zip(w, grad_w)]
+                #w = mlp.project(w)
+            elif method == "manifold":
+                w = mlp.manifold_project(w, grad_w, learning_rate=learning_rate, target_norm=i, method='muon')
+            else:
+                raise ValueError(f"Unknown training method: {method}")
+
+            progress_bar.set_description(f"{method} Loss: {loss:.4f}")
+
+        # Evaluate on the test set
+        X_test = test_images.reshape(test_images.shape[0], -1)
+        test_outputs = mlp(X_test, w)
+        predicted_labels = jnp.argmax(test_outputs, axis=1)
+
+        total_correct = (predicted_labels == test_labels).sum()
+        total_samples = len(test_labels)
+        accuracy = 100 * total_correct / total_samples
+        results[method][i] = float(accuracy)
+        print(f"[{method}] target_norm={i}: accuracy {accuracy:.2f}%")
+
+print("\nSummary of accuracies:")
+for method, scores in results.items():
+    for target_norm, accuracy in scores.items():
+        print(f"  {method} (target_norm={target_norm}): {accuracy:.2f}%")
