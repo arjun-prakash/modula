@@ -26,15 +26,15 @@ def get_batch(key, batch_size):
     return X_train[idx, :], y_train[idx, :]
 
 
-from modula.atom import Linear
+from modula.atom import Linear, matrix_sign
 from modula.bond import ReLU
+
 
 input_dim = X_train.shape[1]
 output_dim = y_train.shape[1]
 width = 256
 
 mlp = Linear(output_dim, width)
-mlp @= ReLU() @ Linear(width, width)
 mlp @= ReLU() @ Linear(width, width)
 mlp @= ReLU() @ Linear(width, input_dim)
 
@@ -66,10 +66,10 @@ mse_and_grad = jax.jit(jax.value_and_grad(mse))
 
 batch_size = 128
 steps = 1000
-learning_rate = 0.001
+learning_rate = 0.01
 
 
-methods = ['descent']
+methods = ['manifold']
 results = {}
 
 for method in methods:
@@ -94,9 +94,12 @@ for method in methods:
             elif method == "descent":
                 #d_w = [g / spec_norm(g) / 3 * jnp.sqrt(g.shape[0]/g.shape[1]) for g in grad_w]
                 w = [weight - learning_rate * grad for weight, grad in zip(w, grad_w)]
-                #w = mlp.project(w)
+                w = mlp.project(w)
             elif method == "manifold":
-                w = mlp.manifold_project(w, grad_w, learning_rate=learning_rate, target_norm=i, method='muon')
+                tangents = mlp.dual_ascent(w, grad_w, target_norm=i)
+                w = [weight - learning_rate * dt for weight, dt in zip(w, tangents)]
+                w = [matrix_sign(weight) for weight in w]  # retraction
+
             else:
                 raise ValueError(f"Unknown training method: {method}")
 
