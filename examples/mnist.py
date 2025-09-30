@@ -1,122 +1,315 @@
-from data.mnist import load_mnist
-
-# Load the MNIST dataset
-train_images, train_labels, test_images, test_labels = load_mnist()
-
-# Print shapes to verify loading
-print(f"Training images shape: {train_images.shape}")
-print(f"Training labels shape: {train_labels.shape}")
-print(f"Test images shape: {test_images.shape}")
-print(f"Test labels shape: {test_labels.shape}")
+import argparse
+import json
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import matplotlib.pyplot as plt
+import numpy as np
+from tqdm import trange
 
-def one_hot(x, k, dtype=jnp.float32):
-    """Create a one-hot encoding of x of size k."""
-    return jnp.array(x[:, None] == jnp.arange(k), dtype)
-
-# Reshape images and convert labels
-X_train = train_images.reshape(train_images.shape[0], -1)
-y_train = one_hot(train_labels, 10)
-
-# Get a batch
-def get_batch(key, batch_size):
-    idx = jax.random.choice(key, X_train.shape[1], shape=(batch_size,))
-    return X_train[idx, :], y_train[idx, :]
-
-
+from data.mnist import load_mnist
 from modula.atom import Linear, matrix_sign
 from modula.bond import ReLU
 
-
-input_dim = X_train.shape[1]
-output_dim = y_train.shape[1]
-width = 256
-
-mlp = Linear(output_dim, width)
-mlp @= ReLU() @ Linear(width, width)
-mlp @= ReLU() @ Linear(width, input_dim)
-
-print(mlp)
-
-mlp.jit()
+METHOD_CHOICES = ("manifold", "dualize", "descent")
 
 
-from tqdm import tqdm
+def prepare_data():
+    train_images, train_labels, test_images, test_labels = load_mnist()
 
-@jax.jit
-def spec_norm(M, num_steps=20):
-    v = jax.random.normal(jax.random.PRNGKey(0), (M.shape[1],))
-    
-    for _ in range(num_steps):
-        u = M @ v
-        u = u / jnp.linalg.norm(u)
-        v = M.T @ u 
-        v = v / jnp.linalg.norm(v)
-    
-    return jnp.linalg.norm(M @ v)
+    X_train = jnp.asarray(train_images, dtype=jnp.float32).reshape(train_images.shape[0], -1) 
+    X_test = jnp.asarray(test_images, dtype=jnp.float32).reshape(test_images.shape[0], -1) 
 
-def mse(w, inputs, targets):
-    outputs = mlp(inputs, w)
-    loss = ((outputs-targets) ** 2).mean()
-    return loss
+    y_train_one_hot = jax.nn.one_hot(jnp.asarray(train_labels, dtype=jnp.int32), 10).astype(jnp.float32)
+    train_labels_int = jnp.asarray(train_labels, dtype=jnp.int32)
+    test_labels_int = jnp.asarray(test_labels, dtype=jnp.int32)
 
-mse_and_grad = jax.jit(jax.value_and_grad(mse))
-
-batch_size = 128
-steps = 1000
-learning_rate = 0.01
+    return X_train, y_train_one_hot, train_labels_int, X_test, test_labels_int
 
 
-methods = ['manifold']
-results = {}
+def build_model(input_dim, output_dim, width):
+    model = Linear(output_dim, width)
+    model @= ReLU() @ Linear(width, width)
+    model @= ReLU() @ Linear(width, input_dim)
+    model.jit()
+    return model
 
-for method in methods:
-    print(f"\n=== Running method: {method} ===")
-    results[method] = {}
 
-    for i in [1.0]:
+def sample_batch(key, batch_size, inputs, targets):
+    idx = jax.random.choice(key, inputs.shape[0], shape=(batch_size,), replace=False)
+    return inputs[idx], targets[idx]
 
-        key = jax.random.PRNGKey(0)
-        w = mlp.initialize(key)
 
-        progress_bar = tqdm(range(steps), desc=f"{method} Loss: {0:.4f}")
-        for step in progress_bar:
-            key = jax.random.PRNGKey(step)
-            inputs, targets = get_batch(key, batch_size)
+def mse_factory(model):
+    def loss_fn(weights, batch_inputs, batch_targets):
+        predictions = model(batch_inputs, weights)
+        return jnp.mean((predictions - batch_targets) ** 2)
 
-            loss, grad_w = mse_and_grad(w, inputs, targets)
+    return loss_fn
 
-            if method == "dualize":
-                d_w = mlp.dualize(grad_w, target_norm=i)
-                w = [weight - learning_rate * d_weight for weight, d_weight in zip(w, d_w)]
-            elif method == "descent":
-                #d_w = [g / spec_norm(g) / 3 * jnp.sqrt(g.shape[0]/g.shape[1]) for g in grad_w]
-                w = [weight - learning_rate * grad for weight, grad in zip(w, grad_w)]
-                w = mlp.project(w)
-            elif method == "manifold":
-                tangents = mlp.dual_ascent(w, grad_w, target_norm=i)
-                w = [weight - learning_rate * dt for weight, dt in zip(w, tangents)]
-                w = [matrix_sign(weight) for weight in w]  # retraction
 
-            else:
-                raise ValueError(f"Unknown training method: {method}")
+def compute_accuracy(model, weights, inputs, labels):
+    logits = model(inputs, weights)
+    predictions = jnp.argmax(logits, axis=1)
+    return float(jnp.mean(predictions == labels) * 100.0)
 
-            progress_bar.set_description(f"{method} Loss: {loss:.4f}")
 
-        # Evaluate on the test set
-        X_test = test_images.reshape(test_images.shape[0], -1)
-        test_outputs = mlp(X_test, w)
-        predicted_labels = jnp.argmax(test_outputs, axis=1)
+def train_single_run(model, base_key, method, learning_rate, steps, batch_size, target_norm, inputs, targets):
+    key_init, key_loop = jax.random.split(base_key)
+    weights = model.initialize(key_init)
 
-        total_correct = (predicted_labels == test_labels).sum()
-        total_samples = len(test_labels)
-        accuracy = 100 * total_correct / total_samples
-        results[method][i] = float(accuracy)
-        print(f"[{method}] target_norm={i}: accuracy {accuracy:.2f}%")
+    loss_fn = mse_factory(model)
+    loss_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 
-print("\nSummary of accuracies:")
-for method, scores in results.items():
-    for target_norm, accuracy in scores.items():
-        print(f"  {method} (target_norm={target_norm}): {accuracy:.2f}%")
+    description = f"{method} lr={learning_rate:.3g}"
+    for step in trange(steps, leave=False, desc=description):
+        key_loop, batch_key = jax.random.split(key_loop)
+        batch_inputs, batch_targets = sample_batch(batch_key, batch_size, inputs, targets)
+
+        loss_value, grad_weights = loss_and_grad(weights, batch_inputs, batch_targets)
+
+        #step_lr = learning_rate * (1.0 - step / steps)
+
+        if method == "manifold":
+            tangents = model.dual_ascent(weights, grad_weights, target_norm=target_norm)
+            weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
+            weights = [matrix_sign(weight_matrix) for weight_matrix in weights]
+        elif method == "dualize":
+            directions = model.dualize(grad_weights, target_norm=target_norm)
+            weights = [w - learning_rate * direction for w, direction in zip(weights, directions)]
+        elif method == "descent":
+            weights = [w - learning_rate * grad for w, grad in zip(weights, grad_weights)]
+            #weights = model.project(weights)
+        else:
+            raise ValueError(f"Unknown training method: {method}")
+
+    return weights, float(loss_value)
+
+
+def singular_values_per_layer(weights):
+    values = []
+    for layer_weights in weights:
+        singular_vals = jnp.linalg.svd(layer_weights, compute_uv=False)
+        values.append(np.asarray(singular_vals))
+    return values
+
+
+def plot_accuracy(results, plots_dir):
+    if not results:
+        return
+
+    fig, (ax_train, ax_test) = plt.subplots(2, 1, sharex=True, figsize=(7, 8))
+    color_map = plt.get_cmap("tab10")
+
+    for idx, (method, runs) in enumerate(results.items()):
+        if not runs:
+            continue
+        color = color_map(idx % 10)
+        learning_rates = [entry["learning_rate"] for entry in runs]
+        train_accs = [entry["train_accuracy"] for entry in runs]
+        test_accs = [entry["test_accuracy"] for entry in runs]
+
+        ax_train.plot(learning_rates, train_accs, marker="o", color=color, label=method)
+        ax_test.plot(learning_rates, test_accs, marker="o", color=color, label=method)
+
+    ax_test.set_xscale("log")
+    ax_test.set_xlabel("Learning rate")
+
+    ax_train.set_ylabel("Train accuracy (%)")
+    ax_test.set_ylabel("Test accuracy (%)")
+
+    ax_train.set_title("MNIST manifold GD sweep: train accuracy")
+    ax_test.set_title("MNIST manifold GD sweep: test accuracy")
+
+    ax_train.grid(True, linestyle="--", alpha=0.3)
+    ax_test.grid(True, linestyle="--", alpha=0.3)
+
+    ax_train.legend()
+    ax_test.legend()
+
+    fig.tight_layout()
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(plots_dir / "mnist_accuracy_vs_lr.png", dpi=300)
+    plt.close(fig)
+
+
+def plot_singular_values(best_runs, plots_dir):
+    if not best_runs:
+        return
+
+    methods = list(best_runs.keys())
+    fig, axes = plt.subplots(len(methods), 1, figsize=(7, 4 * len(methods)), squeeze=False)
+
+    for idx, method in enumerate(methods):
+        axis = axes[idx, 0]
+        run = best_runs[method]
+        singular_values = singular_values_per_layer(run["weights"])
+
+        for layer_idx, layer_values in enumerate(singular_values, start=1):
+            axis.plot(
+                np.arange(1, layer_values.size + 1),
+                np.sort(layer_values)[::-1],
+                marker="o",
+                label=f"Layer {layer_idx}"
+            )
+
+        axis.set_yscale("log")
+        axis.set_xlabel("Singular value index")
+        axis.set_ylabel("Magnitude")
+        axis.set_title(
+            f"{method} best lr={run['learning_rate']:.3g} (test acc {run['test_accuracy']:.2f}%)"
+        )
+        axis.grid(True, linestyle="--", alpha=0.3)
+        axis.legend()
+
+    fig.tight_layout()
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(plots_dir / "mnist_best_lr_singular_values.png", dpi=300)
+    plt.close(fig)
+
+
+def save_results(results, best_runs, args, output_path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "config": {
+            "learning_rates": [float(lr) for lr in args.learning_rates],
+            "steps": int(args.steps),
+            "batch_size": int(args.batch_size),
+            "seed": int(args.seed),
+            "target_norm": float(args.target_norm),
+            "hidden_width": int(args.hidden_width),
+            "methods": list(args.methods),
+        },
+        "methods": {},
+    }
+
+    for method, runs in results.items():
+        payload["methods"][method] = {
+            "runs": [
+                {
+                    "learning_rate": float(entry["learning_rate"]),
+                    "train_accuracy": float(entry["train_accuracy"]),
+                    "test_accuracy": float(entry["test_accuracy"]),
+                    "final_loss": float(entry["final_loss"]),
+                }
+                for entry in runs
+            ]
+        }
+        best = best_runs.get(method)
+        if best is not None:
+            payload["methods"][method]["best"] = {
+                "learning_rate": float(best["learning_rate"]),
+                "train_accuracy": float(best["train_accuracy"]),
+                "test_accuracy": float(best["test_accuracy"]),
+                "final_loss": float(best["final_loss"]),
+            }
+
+    with output_path.open("w") as fp:
+        json.dump(payload, fp, indent=2)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="MNIST manifold gradient descent sweep")
+    parser.add_argument(
+        "--learning-rates",
+        type=float,
+        nargs="+",
+        default=[1e-1, 5e-2, 1e-2, 5e-3],
+        help="Learning rates to sweep",
+    )
+    parser.add_argument("--steps", type=int, default=1000, help="Training steps per learning rate")
+    parser.add_argument("--batch-size", type=int, default=128, help="Mini-batch size")
+    parser.add_argument("--seed", type=int, default=0, help="PRNG seed")
+    parser.add_argument("--target-norm", type=float, default=1.0, help="Target norm for tangent updates")
+    parser.add_argument("--hidden-width", type=int, default=256, help="Hidden layer width")
+    parser.add_argument(
+        "--methods",
+        type=str,
+        nargs="+",
+        default=list(METHOD_CHOICES),
+        choices=METHOD_CHOICES,
+        help="Training methods to compare",
+    )
+    parser.add_argument(
+        "--results-path",
+        type=Path,
+        default=Path("results/mnist_manifold_results.json"),
+        help="Path to save sweep metrics",
+    )
+    parser.add_argument(
+        "--plots-dir",
+        type=Path,
+        default=Path("plots"),
+        help="Directory for plot outputs",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    X_train, y_train_one_hot, train_labels_int, X_test, test_labels_int = prepare_data()
+
+    input_dim = X_train.shape[1]
+    output_dim = y_train_one_hot.shape[1]
+
+    model = build_model(input_dim, output_dim, args.hidden_width)
+
+    results = {method: [] for method in args.methods}
+    best_runs = {}
+
+    base_key = jax.random.PRNGKey(args.seed)
+
+    for method_idx, method in enumerate(args.methods):
+        method_key = jax.random.fold_in(base_key, method_idx)
+
+        for lr_idx, learning_rate in enumerate(args.learning_rates):
+            run_key = jax.random.fold_in(method_key, lr_idx)
+            weights, final_loss = train_single_run(
+                model,
+                run_key,
+                method,
+                learning_rate,
+                args.steps,
+                args.batch_size,
+                args.target_norm,
+                X_train,
+                y_train_one_hot,
+            )
+
+            train_accuracy = compute_accuracy(model, weights, X_train, train_labels_int)
+            test_accuracy = compute_accuracy(model, weights, X_test, test_labels_int)
+
+            entry = {
+                "learning_rate": learning_rate,
+                "train_accuracy": train_accuracy,
+                "test_accuracy": test_accuracy,
+                "final_loss": final_loss,
+            }
+            results[method].append(entry)
+
+            best = best_runs.get(method)
+            if best is None or test_accuracy > best["test_accuracy"]:
+                best_runs[method] = {
+                    "learning_rate": learning_rate,
+                    "train_accuracy": train_accuracy,
+                    "test_accuracy": test_accuracy,
+                    "final_loss": final_loss,
+                    "weights": weights,
+                }
+
+            print(
+                f"[{method}] lr={learning_rate:.3g}: train acc={train_accuracy:.2f}% | "
+                f"test acc={test_accuracy:.2f}% | loss={final_loss:.4f}"
+            )
+
+    plot_accuracy(results, args.plots_dir)
+    plot_singular_values(best_runs, args.plots_dir)
+
+    save_results(results, best_runs, args, args.results_path)
+
+
+if __name__ == "__main__":
+    main()
