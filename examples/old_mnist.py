@@ -69,7 +69,7 @@ steps = 1000
 learning_rate = 0.1
 
 
-methods = ['descent']
+methods = ['manifold_online']
 results = {}
 
 for method in methods:
@@ -80,6 +80,10 @@ for method in methods:
 
         key = jax.random.PRNGKey(0)
         w = mlp.initialize(key)
+
+        dual_alpha = 1e-2
+        dual_beta = 0.9
+        dual_state = mlp.init_dual_state(w) if method == "manifold_online" else None
 
         progress_bar = tqdm(range(steps), desc=f"{method} Loss: {0:.4f}")
         for step in progress_bar:
@@ -97,6 +101,17 @@ for method in methods:
                 w = mlp.project(w)
             elif method == "manifold":
                 tangents = mlp.dual_ascent(w, grad_w, target_norm=i)
+                w = [weight - learning_rate * dt for weight, dt in zip(w, tangents)]
+                w = [matrix_sign(weight) for weight in w]  # retraction
+            elif method == "manifold_online":
+                tangents, dual_state = mlp.online_dual_ascent(
+                    dual_state,
+                    w,
+                    grad_w,
+                    target_norm=i,
+                    alpha=dual_alpha,
+                    beta=dual_beta,
+                )
                 w = [weight - learning_rate * dt for weight, dt in zip(w, tangents)]
                 w = [matrix_sign(weight) for weight in w]  # retraction
 

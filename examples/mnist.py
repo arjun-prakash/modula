@@ -12,7 +12,7 @@ from data.mnist import load_mnist
 from modula.atom import Linear, matrix_sign
 from modula.bond import ReLU
 
-METHOD_CHOICES = ("manifold", "dualize", "descent")
+METHOD_CHOICES = ( "manifold_online", "dualize", "descent")
 
 
 def prepare_data():
@@ -62,6 +62,11 @@ def train_single_run(model, base_key, method, learning_rate, steps, batch_size, 
     loss_fn = mse_factory(model)
     loss_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 
+    dual_alpha = 2e-5
+    dual_beta = 0.9
+    dual_state = model.init_dual_state(weights) if method == "manifold_online" else None
+
+
     description = f"{method} lr={learning_rate:.3g}"
     for step in trange(steps, leave=False, desc=description):
         key_loop, batch_key = jax.random.split(key_loop)
@@ -75,6 +80,19 @@ def train_single_run(model, base_key, method, learning_rate, steps, batch_size, 
             tangents = model.dual_ascent(weights, grad_weights, target_norm=target_norm)
             weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
             weights = [matrix_sign(weight_matrix) for weight_matrix in weights]
+
+        elif method == 'manifold_online':
+            tangents, dual_state = model.online_dual_ascent(
+                    dual_state,
+                    weights,
+                    grad_weights,
+                    target_norm=1,
+                    alpha=dual_alpha,
+                    beta=dual_beta,
+                )
+            weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
+            weights = [matrix_sign(weight_matrix) for weight_matrix in weights]  # retraction
+
         elif method == "dualize":
             directions = model.dualize(grad_weights, target_norm=target_norm)
             weights = [w - learning_rate * direction for w, direction in zip(weights, directions)]
@@ -93,6 +111,14 @@ def singular_values_per_layer(weights):
         singular_vals = jnp.linalg.svd(layer_weights, compute_uv=False)
         values.append(np.asarray(singular_vals))
     return values
+
+
+def singular_values_combined(weights):
+    layer_values = singular_values_per_layer(weights)
+    if not layer_values:
+        return np.array([])
+    stacked = np.concatenate(layer_values)
+    return np.sort(stacked)[::-1]
 
 
 def plot_accuracy(results, plots_dir):
@@ -138,35 +164,34 @@ def plot_singular_values(best_runs, plots_dir):
     if not best_runs:
         return
 
-    methods = list(best_runs.keys())
-    fig, axes = plt.subplots(len(methods), 1, figsize=(7, 4 * len(methods)), squeeze=False)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    color_map = plt.get_cmap("tab10")
 
-    for idx, method in enumerate(methods):
-        axis = axes[idx, 0]
-        run = best_runs[method]
-        singular_values = singular_values_per_layer(run["weights"])
-
-        for layer_idx, layer_values in enumerate(singular_values, start=1):
-            axis.plot(
-                np.arange(1, layer_values.size + 1),
-                np.sort(layer_values)[::-1],
-                marker="o",
-                label=f"Layer {layer_idx}"
-            )
-
-        axis.set_yscale("log")
-        axis.set_xlabel("Singular value index")
-        axis.set_ylabel("Magnitude")
-        axis.set_title(
-            f"{method} best lr={run['learning_rate']:.3g} (test acc {run['test_accuracy']:.2f}%)"
+    for idx, (method, run) in enumerate(best_runs.items()):
+        combined = singular_values_combined(run["weights"])
+        if combined.size == 0:
+            continue
+        indices = np.arange(1, combined.size + 1)
+        ax.plot(
+            indices,
+            combined,
+            marker="o",
+            color=color_map(idx % 10),
+            label=f"{method} lr={run['learning_rate']:.3g} (test {run['test_accuracy']:.2f}%)",
         )
-        axis.grid(True, linestyle="--", alpha=0.3)
-        axis.legend()
+
+    ax.set_yscale("log")
+    ax.set_xlabel("Singular value index")
+    ax.set_ylabel("Magnitude")
+    ax.set_title("Best-run singular spectra by method")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.legend()
 
     fig.tight_layout()
     plots_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(plots_dir / "mnist_best_lr_singular_values.png", dpi=300)
     plt.close(fig)
+
 
 
 def save_results(results, best_runs, args, output_path):
@@ -216,14 +241,14 @@ def parse_args():
         "--learning-rates",
         type=float,
         nargs="+",
-        default=[1e-1, 5e-2, 1e-2, 5e-3],
+        default=[1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8],
         help="Learning rates to sweep",
     )
     parser.add_argument("--steps", type=int, default=1000, help="Training steps per learning rate")
     parser.add_argument("--batch-size", type=int, default=128, help="Mini-batch size")
     parser.add_argument("--seed", type=int, default=0, help="PRNG seed")
     parser.add_argument("--target-norm", type=float, default=1.0, help="Target norm for tangent updates")
-    parser.add_argument("--hidden-width", type=int, default=256, help="Hidden layer width")
+    parser.add_argument("--hidden-width", type=int, default=32, help="Hidden layer width")
     parser.add_argument(
         "--methods",
         type=str,
