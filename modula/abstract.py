@@ -47,6 +47,10 @@ class Module:
         # Return a weight list.
         raise NotImplementedError
 
+    def retract(self, w):
+        # Return a weight list.
+        raise NotImplementedError
+
     def dualize(self, grad_w, target_norm):
         # Weight gradient list and number --> normalized weight gradient list
         raise NotImplementedError
@@ -109,6 +113,9 @@ class Bond(Module):
     def project(self, w):
         return []
 
+    def retract(self, w):
+        return []
+
     def dualize(self, grad_w, target_norm=1.0):
         return []
 
@@ -151,6 +158,12 @@ class CompositeModule(Module):
         w0 = w[:m0.atoms]
         w1 = w[m0.atoms:]
         return m0.project(w0) + m1.project(w1)
+
+    def retract(self, w):
+        m0, m1 = self.children
+        w0 = w[:m0.atoms]
+        w1 = w[m0.atoms:]
+        return m0.retract(w0) + m1.retract(w1)
 
     def dualize(self, grad_w, target_norm=1.0):
         if self.mass > 0:

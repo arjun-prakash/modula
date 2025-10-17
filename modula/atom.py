@@ -202,6 +202,11 @@ class Linear(Atom):
         weight = orthogonalize(weight) * jnp.sqrt(self.fanout / self.fanin)
         return [weight]
 
+    def retract(self, w):
+        weight = w[0]
+        weight = matrix_sign(weight)
+        return [weight]
+
     def dualize(self, grad_w, target_norm=1.0):
         grad = grad_w[0]
         d_weight = orthogonalize(grad) * jnp.sqrt(self.fanout / self.fanin) * target_norm
@@ -277,7 +282,13 @@ class Linear(Atom):
 
         return [tangent], [(lam_next, vel_next)]
 
-   
+
+class ProbDist(Linear):
+    def retract(self, w):
+        weight = w[0]
+        weight = jax.nn.softmax(weight, axis=-1)
+        return [weight]
+
 
 class Embed(Atom):
     def __init__(self, d_embed, num_embed):

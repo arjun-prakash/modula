@@ -102,7 +102,7 @@ for method in methods:
             elif method == "manifold":
                 tangents = mlp.dual_ascent(w, grad_w, target_norm=i)
                 w = [weight - learning_rate * dt for weight, dt in zip(w, tangents)]
-                w = [matrix_sign(weight) for weight in w]  # retraction
+                w = [retract(weight) for weight in w]  # retraction
             elif method == "manifold_online":
                 tangents, dual_state = mlp.online_dual_ascent(
                     dual_state,
@@ -113,7 +113,7 @@ for method in methods:
                     beta=dual_beta,
                 )
                 w = [weight - learning_rate * dt for weight, dt in zip(w, tangents)]
-                w = [matrix_sign(weight) for weight in w]  # retraction
+                w = [retract(weight) for weight in w]  # retraction
 
             else:
                 raise ValueError(f"Unknown training method: {method}")
