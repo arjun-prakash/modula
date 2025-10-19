@@ -91,32 +91,83 @@ class Embed(Atom):
         return [d_weight]
 
 class Conv2D(Atom):
-    def __init__(self, fanout, fanin):
+    
+    # no stride and padding for simplicity
+    def __init__(self, d_in, d_out, kernel_size):
         super().__init__()
-        self.fanin  = fanin
-        self.fanout = fanout
+        self.d_in  = d_in
+        self.d_out = d_out
+        self.k = kernel_size # add kernel size
         self.smooth = True
-        self.mass = 1
+        self.mass = 1 
         self.sensitivity = 1
 
     def forward(self, x, w):
-        # x shape is [..., fanin]
-        weights = w[0]  # shape is [fanout, fanin]
-        return jnp.einsum("...ij,...j->...i", weights, x)
+        # x shape is [N, H, W, C]
+        weights = w[0]  # shape is [k, k, d_in, d_out]
+
+        return jax.lax.conv_general_dilated(
+            lhs=x,
+            rhs=weights,
+            window_strides=(1,1),
+            padding="SAME",
+            dimension_numbers=('NHWC', 'HWIO', 'NHWC')
+        )
 
     def initialize(self, key):
-        weight = jax.random.normal(key, shape=(self.fanout, self.fanin))
-        weight = orthogonalize(weight) * jnp.sqrt(self.fanout / self.fanin)
-        return [weight]
+        shape = (self.d_in, self.d_out, self.k, self.k)
+        weight = jax.random.normal(key, shape=shape)
+
+        vectorized_ortho = jax.vmap(
+            jax.vmap(orthogonalize, in_axes=2, out_axes=2),
+            in_axes=3, 
+            out_axes=3
+        )
+
+        # Mod. norm p17: scale factor for normalized weights
+        scale_factor = jnp.sqrt(self.d_out / self.d_in) / self.k
+
+        weight = vectorized_ortho(weight) * scale_factor
+
+        # Permute weights to [k, k, d_in, d_out] for jax conv
+        weight_permuted = jnp.transpose(weight, (2, 3, 0, 1))
+
+        return [weight_permuted]
 
     def project(self, w):
-        weight = w[0]
-        weight = orthogonalize(weight) * jnp.sqrt(self.fanout / self.fanin)
-        return [weight]
+        weight = w[0]  # shape is [k, k, d_in, d_out]
+        
+        # Define a function to apply to each spatial slice
+        def project_slice(g):
+            return orthogonalize(g) * jnp.sqrt(self.d_out / self.d_in) / (self.k**2)
+        
+        weight_transposed = jnp.transpose(weight, (2, 3, 0, 1))
+        
+        vectorized_project = jax.vmap(jax.vmap(project_slice, in_axes=2, out_axes=2), in_axes=3, out_axes=3)
+        
+        weight_projected = vectorized_project(weight_transposed)
+        weight_projected = jnp.transpose(weight_projected, (2, 3, 0, 1))
+        
+        return [weight_projected]
 
     def dualize(self, grad_w, target_norm=1.0):
-        grad = grad_w[0]
-        d_weight = orthogonalize(grad) * jnp.sqrt(self.fanout / self.fanin) * target_norm
+        grad = grad_w[0]  # shape is [k, k, d_in, d_out]
+        
+        # Transpose to [d_in, d_out, k, k] for orthogonalization
+        grad_transposed = jnp.transpose(grad, (2, 3, 0, 1))
+        
+        # Modular duality P7, example 7
+        # Define a function to apply to each spatial slice
+        def dualize_slice(g):
+            return orthogonalize(g) * jnp.sqrt(self.d_out / self.d_in) / (self.k**2) * target_norm
+
+        # Create a vectorized version that maps over spatial dimensions
+        vectorized_dualize = jax.vmap(jax.vmap(dualize_slice, in_axes=2, out_axes=2), in_axes=3, out_axes=3)
+
+        # Apply dualization and transpose back to [k, k, d_in, d_out]
+        d_weight = vectorized_dualize(grad_transposed)
+        d_weight = jnp.transpose(d_weight, (2, 3, 0, 1))
+        
         return [d_weight]
 
 if __name__ == "__main__":
