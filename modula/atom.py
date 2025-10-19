@@ -90,6 +90,34 @@ class Embed(Atom):
         d_weight = jnp.nan_to_num(d_weight)
         return [d_weight]
 
+class Conv2D(Atom):
+    def __init__(self, fanout, fanin):
+        super().__init__()
+        self.fanin  = fanin
+        self.fanout = fanout
+        self.smooth = True
+        self.mass = 1
+        self.sensitivity = 1
+
+    def forward(self, x, w):
+        # x shape is [..., fanin]
+        weights = w[0]  # shape is [fanout, fanin]
+        return jnp.einsum("...ij,...j->...i", weights, x)
+
+    def initialize(self, key):
+        weight = jax.random.normal(key, shape=(self.fanout, self.fanin))
+        weight = orthogonalize(weight) * jnp.sqrt(self.fanout / self.fanin)
+        return [weight]
+
+    def project(self, w):
+        weight = w[0]
+        weight = orthogonalize(weight) * jnp.sqrt(self.fanout / self.fanin)
+        return [weight]
+
+    def dualize(self, grad_w, target_norm=1.0):
+        grad = grad_w[0]
+        d_weight = orthogonalize(grad) * jnp.sqrt(self.fanout / self.fanin) * target_norm
+        return [d_weight]
 
 if __name__ == "__main__":
 

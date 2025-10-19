@@ -11,3 +11,5 @@ docs/source/examples/assets/
 examples/.ipynb_checkpoints/
 examples/data/*
 !examples/data/*.py
+
+paper/
