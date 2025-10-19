@@ -91,7 +91,6 @@ class Embed(Atom):
         return [d_weight]
 
 class Conv2D(Atom):
-    
     # no stride and padding for simplicity
     def __init__(self, d_in, d_out, kernel_size):
         super().__init__()

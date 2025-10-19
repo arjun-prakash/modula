@@ -135,3 +135,18 @@ class Rope(Bond):
     def forward(self, x, w):
         q, k = x
         return self.rotate(q), self.rotate(k)
+
+class Flatten(Bond):
+    """Flattens spatial dimensions for Conv2D outputs.
+    
+    Input shape: [N, H, W, C]
+    Output shape: [N, H*W*C]
+    """
+    def __init__(self):
+        super().__init__()
+        self.smooth = True
+        self.sensitivity = 1
+    
+    def forward(self, x, w):
+        batch_size = x.shape[0]
+        return x.reshape(batch_size, -1)
