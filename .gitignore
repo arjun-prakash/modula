@@ -2,6 +2,7 @@
 
 modula.egg-info/
 modula/__pycache__/
+examples/__pycache__/
 
 docs/build/
 docs/jupyter_execute/
@@ -11,3 +12,8 @@ docs/source/examples/assets/
 examples/.ipynb_checkpoints/
 examples/data/*
 !examples/data/*.py
+
+slurm_logs/
+*.png
+*.pyc
+*.json

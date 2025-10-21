@@ -49,6 +49,9 @@ def build_model(input_dim, hidden_width):
     output_dim = 2
     model = Linear(output_dim, hidden_width)
     model @= ReLU() @ Linear(hidden_width, hidden_width)
+    model @= ReLU() @ Linear(hidden_width, hidden_width)
+    model @= ReLU() @ Linear(hidden_width, hidden_width)
+
     model @= ReLU() @ Linear(hidden_width, input_dim)
     model.jit()
     return model
@@ -292,9 +295,9 @@ def parse_args():
     parser.add_argument("--num-tasks", type=int, default=49, help="Number of sequential tasks (max 50)")
     parser.add_argument("--steps-per-task", type=int, default=1000, help="Training steps allocated to each task")
     parser.add_argument("--batch-size", type=int, default=64, help="Mini-batch size")
-    parser.add_argument("--learning-rate", type=float, default=5e-3, help="Learning rate for all methods")
+    parser.add_argument("--learning-rate", type=float, default=2e-2, help="Learning rate for all methods")
     parser.add_argument("--target-norm", type=float, default=1.0, help="Target norm for manifold-based updates")
-    parser.add_argument("--hidden-width", type=int, default=64, help="Width of MLP hidden layers")
+    parser.add_argument("--hidden-width", type=int, default=128, help="Width of MLP hidden layers")
     parser.add_argument("--seed", type=int, default=0, help="PRNG seed for weight initialization and batches")
     parser.add_argument(
         "--pair-seed",
