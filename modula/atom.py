@@ -283,6 +283,45 @@ class Linear(Atom):
         return [tangent], [(lam_next, vel_next)]
 
 
+class Bias(Atom):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        self.smooth = True
+        self.mass = 1
+        self.sensitivity = 1
+
+    def forward(self, x, w):
+        bias = w[0]
+        return x + bias
+
+    def initialize(self, key):
+        bias = jnp.zeros((self.dim,), dtype=jnp.float32)
+        return [bias]
+
+    def project(self, w):
+        return [w[0]]
+
+    def retract(self, w):
+        return [w[0]]
+
+    def dualize(self, grad_w, target_norm=1.0):
+        grad = grad_w[0]
+        norm = jnp.linalg.norm(grad)
+        scale = target_norm / (norm + 1e-12)
+        return [grad * scale]
+
+    def dual_ascent(self, w, grad_w, target_norm=1.0):
+        return self.dualize(grad_w, target_norm)
+
+    def init_dual_state(self, w):
+        return [jnp.zeros_like(w[0])]
+
+    def online_dual_ascent(self, state, w, grad_w, *, target_norm=1.0, alpha=1e-2, beta=0.9):
+        tangent = self.dualize(grad_w, target_norm)
+        return tangent, (state if state else self.init_dual_state(w))
+
+
 class ProbDist(Linear):
     def retract(self, w):
         weight = w[0]

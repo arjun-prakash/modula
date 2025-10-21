@@ -1,178 +1,186 @@
 #!/usr/bin/env python3
 """
-deeponet.py - Deep Operator Network implementation
+deeponet.py - Modula-based Deep Operator Network implementation.
 """
+from __future__ import annotations
 
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import List, Optional, Sequence, Tuple, Union
+
+import jax
+import jax.numpy as jnp
 import numpy as np
+
+try:
+    from modula.atom import Bias, Linear
+    from modula.bond import HadamardProduct, ReLU, Select
+    from modula.abstract import Module
+except ModuleNotFoundError:  # pragma: no cover - fallback for source tree execution
+    from modula.modula.atom import Bias, Linear
+    from modula.modula.bond import HadamardProduct, ReLU, Select
+    from modula.modula.abstract import Module
+
+ArrayLike = Union[np.ndarray, jnp.ndarray]
+PathLike = Union[str, Path]
+
+
+__all__ = ['DeepONet', 'DeepONetConfig', 'build_deeponet_module']
+
+
+def sequential(modules: Sequence[Module]) -> Module:
+    if not modules:
+        raise ValueError('sequential requires at least one module')
+    composed = modules[-1]
+    for block in reversed(modules[:-1]):
+        composed = composed @ block
+    return composed
+
+
+@dataclass(frozen=True)
+class DeepONetConfig:
+    branch_input_dim: int = 10
+    trunk_input_dim: int = 10
+    hidden_dim: int = 64
+    output_dim: int = 3
+    branch_mass: float = 1.0
+    trunk_mass: float = 1.0
+
+
+def _build_branch(config: DeepONetConfig) -> Module:
+    branch = sequential([
+        Select(0),
+        Linear(config.hidden_dim, config.branch_input_dim),
+        Bias(config.hidden_dim),
+        ReLU(),
+        Linear(config.hidden_dim, config.hidden_dim),
+        Bias(config.hidden_dim),
+        ReLU(),
+        Linear(config.hidden_dim, config.hidden_dim),
+        Bias(config.hidden_dim),
+    ])
+    branch.tare(absolute=config.branch_mass)
+    return branch
+
+
+def _build_trunk(config: DeepONetConfig) -> Module:
+    trunk = sequential([
+        Select(1),
+        Linear(config.hidden_dim, config.trunk_input_dim),
+        Bias(config.hidden_dim),
+        ReLU(),
+        Linear(config.hidden_dim, config.hidden_dim),
+        Bias(config.hidden_dim),
+        ReLU(),
+        Linear(config.hidden_dim, config.hidden_dim),
+        Bias(config.hidden_dim),
+    ])
+    trunk.tare(absolute=config.trunk_mass)
+    return trunk
+
+
+def build_deeponet_module(config: DeepONetConfig) -> Module:
+    branch = _build_branch(config)
+    trunk = _build_trunk(config)
+    features = HadamardProduct() @ (branch, trunk)
+
+    model = sequential([
+        features,
+        Linear(config.output_dim, config.hidden_dim),
+        Bias(config.output_dim),
+    ])
+    return model
+
+
+def _as_numpy(weights: Sequence[ArrayLike]) -> List[np.ndarray]:
+    return [np.asarray(w) for w in weights]
+
+
+def _as_jax(weights: Sequence[ArrayLike]) -> List[jnp.ndarray]:
+    return [jnp.asarray(w) for w in weights]
+
+
+def _normalise_inputs(gust_features: ArrayLike, trunk_vec: ArrayLike) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    gf = jnp.asarray(gust_features, dtype=jnp.float32)
+    tv = jnp.asarray(trunk_vec, dtype=jnp.float32)
+    if gf.ndim == 1:
+        gf = gf[None, :]
+    if tv.ndim == 1:
+        tv = tv[None, :]
+    return gf, tv
 
 
 class DeepONet:
-    """
-    Deep Operator Network for disturbance prediction
-    
-    Architecture:
-        Branch: encodes gust features (10-dim)
-        Trunk: encodes state + time + base wind (10-dim)
-        Output: predicted disturbance force (3-dim)
-    """
-    
-    def __init__(self, branch_input_dim=10, trunk_input_dim=10, 
-                 hidden_dim=64, output_dim=3, seed=0):
-        rng = np.random.default_rng(seed)
+    """Convenience wrapper around the Modula DeepONet module."""
 
-        def xavier_init(din, dout):
-            return (rng.standard_normal((din, dout)).astype(np.float32) 
-                    * np.sqrt(2.0 / din))
+    def __init__(self, config: Optional[DeepONetConfig] = None, *, jit: bool = True):
+        self.config = config or DeepONetConfig()
+        self.model = build_deeponet_module(self.config)
+        if jit:
+            self.model.jit()
+        self._weights: Optional[List[jnp.ndarray]] = None
 
-        # Branch network
-        self.W_branch1 = xavier_init(branch_input_dim, hidden_dim)
-        self.b_branch1 = np.zeros(hidden_dim, dtype=np.float32)
-        self.W_branch2 = xavier_init(hidden_dim, hidden_dim)
-        self.b_branch2 = np.zeros(hidden_dim, dtype=np.float32)
+    # ------------------------------------------------------------------
+    # Weight management
+    # ------------------------------------------------------------------
+    def initialize(self, key: Optional[jax.Array] = None) -> List[jnp.ndarray]:
+        if key is None:
+            key = jax.random.PRNGKey(0)
+        self._weights = self.model.initialize(key)
+        return self._weights
 
-        # Trunk network
-        self.W_trunk1 = xavier_init(trunk_input_dim, hidden_dim)
-        self.b_trunk1 = np.zeros(hidden_dim, dtype=np.float32)
-        self.W_trunk2 = xavier_init(hidden_dim, hidden_dim)
-        self.b_trunk2 = np.zeros(hidden_dim, dtype=np.float32)
+    def set_weights(self, weights: Sequence[ArrayLike]) -> None:
+        self._weights = _as_jax(weights)
 
-        # Output layer
-        self.W_out = xavier_init(hidden_dim, output_dim)
-        self.b_out = np.zeros(output_dim, dtype=np.float32)
+    @property
+    def weights(self) -> List[jnp.ndarray]:
+        if self._weights is None:
+            raise ValueError("DeepONet weights are not initialised.")
+        return self._weights
 
-    @staticmethod
-    def _relu(x):
-        return np.maximum(0.0, x)
+    # ------------------------------------------------------------------
+    # Persistence helpers
+    # ------------------------------------------------------------------
+    def save_weights(self, filepath: PathLike, weights: Optional[Sequence[ArrayLike]] = None) -> None:
+        weights_to_save = _as_numpy(weights or self.weights)
+        payload = {f"arr_{idx}": array for idx, array in enumerate(weights_to_save)}
+        payload["num_arrays"] = np.array(len(weights_to_save), dtype=np.int32)
+        payload["config_json"] = np.array(json.dumps(asdict(self.config)))
+        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+        np.savez(Path(filepath), **payload)
 
-    @staticmethod
-    def _relu_deriv_from_pre(z):
-        return (z > 0.0).astype(np.float32)
+    def load_weights(self, filepath: PathLike) -> List[jnp.ndarray]:
+        with np.load(Path(filepath), allow_pickle=False) as data:
+            try:
+                config_payload = json.loads(str(data["config_json"].item()))
+                config = DeepONetConfig(**config_payload)
+            except KeyError:
+                config = self.config
+            if config != self.config:
+                self.config = config
+                self.model = build_deeponet_module(self.config)
+                self.model.jit()
 
-    def forward(self, gust_features, trunk_vec, return_cache=False):
-        """
-        Forward pass
-        
-        Args:
-            gust_features: (B, 10) or (10,)
-            trunk_vec: (B, 10) or (10,)
-            return_cache: bool, whether to cache for backprop
-            
-        Returns:
-            output: (B, 3) predicted disturbance force
-            cache: dict (if return_cache=True)
-        """
-        gf = gust_features
-        tv = trunk_vec
-        if gf.ndim == 1:
-            gf = gf.reshape(1, -1)
-        if tv.ndim == 1:
-            tv = tv.reshape(1, -1)
+            num_arrays = int(data["num_arrays"]) if "num_arrays" in data else None
+            if num_arrays is None:
+                keys = sorted(k for k in data.files if k.startswith("arr_"))
+            else:
+                keys = [f"arr_{idx}" for idx in range(num_arrays)]
+            weights = [jnp.asarray(data[key]) for key in keys]
+            self._weights = weights
+        return self.weights
 
-        # Branch forward
-        z_b1 = gf @ self.W_branch1 + self.b_branch1
-        b1 = self._relu(z_b1)
-        z_b2 = b1 @ self.W_branch2 + self.b_branch2
-        b2 = self._relu(z_b2)
+    # ------------------------------------------------------------------
+    # Inference helpers
+    # ------------------------------------------------------------------
+    def apply(self, gust_features: ArrayLike, trunk_vec: ArrayLike, *, weights: Optional[Sequence[ArrayLike]] = None) -> jnp.ndarray:
+        model_weights = _as_jax(weights or self.weights)
+        gf, tv = _normalise_inputs(gust_features, trunk_vec)
+        return self.model((gf, tv), model_weights)
 
-        # Trunk forward
-        z_t1 = tv @ self.W_trunk1 + self.b_trunk1
-        t1 = self._relu(z_t1)
-        z_t2 = t1 @ self.W_trunk2 + self.b_trunk2
-        t2 = self._relu(z_t2)
+    def forward(self, gust_features: ArrayLike, trunk_vec: ArrayLike, *, weights: Optional[Sequence[ArrayLike]] = None) -> np.ndarray:
+        output = self.apply(gust_features, trunk_vec, weights=weights)
+        return np.asarray(output)
 
-        # Combine and output
-        combined = b2 * t2
-        out = combined @ self.W_out + self.b_out
-
-        if not return_cache:
-            return out
-
-        cache = dict(
-            gust_features=gf, trunk_vec=tv,
-            z_b1=z_b1, b1=b1, z_b2=z_b2, b2=b2,
-            z_t1=z_t1, t1=t1, z_t2=z_t2, t2=t2,
-            combined=combined
-        )
-        return out, cache
-
-    def backward(self, cache, grad_out, learning_rate=0.001, weight_decay=0.0):
-        """
-        Backpropagation for mini-batch
-        
-        Args:
-            cache: dict from forward pass
-            grad_out: (B, 3) gradient of loss w.r.t. output
-            learning_rate: float
-            weight_decay: float, L2 regularization
-        """
-        # Output layer gradients
-        grad_W_out = cache['combined'].T @ grad_out
-        grad_b_out = np.sum(grad_out, axis=0)
-        grad_comb = grad_out @ self.W_out.T
-
-        # Split to branch & trunk
-        grad_b2 = grad_comb * cache['t2']
-        grad_t2 = grad_comb * cache['b2']
-
-        # Branch backprop
-        grad_b2_pre = grad_b2 * self._relu_deriv_from_pre(cache['z_b2'])
-        grad_W_b2 = cache['b1'].T @ grad_b2_pre
-        grad_b_b2 = np.sum(grad_b2_pre, axis=0)
-
-        grad_b1 = grad_b2_pre @ self.W_branch2.T
-        grad_b1_pre = grad_b1 * self._relu_deriv_from_pre(cache['z_b1'])
-        grad_W_b1 = cache['gust_features'].T @ grad_b1_pre
-        grad_b_b1 = np.sum(grad_b1_pre, axis=0)
-
-        # Trunk backprop
-        grad_t2_pre = grad_t2 * self._relu_deriv_from_pre(cache['z_t2'])
-        grad_W_t2 = cache['t1'].T @ grad_t2_pre
-        grad_b_t2 = np.sum(grad_t2_pre, axis=0)
-
-        grad_t1 = grad_t2_pre @ self.W_trunk2.T
-        grad_t1_pre = grad_t1 * self._relu_deriv_from_pre(cache['z_t1'])
-        grad_W_t1 = cache['trunk_vec'].T @ grad_t1_pre
-        grad_b_t1 = np.sum(grad_t1_pre, axis=0)
-
-        # Apply weight decay
-        def decay(W):
-            return weight_decay * W if weight_decay > 0 else 0.0
-
-        # Update weights
-        self.W_out -= learning_rate * (grad_W_out + decay(self.W_out))
-        self.b_out -= learning_rate * grad_b_out
-
-        self.W_branch2 -= learning_rate * (grad_W_b2 + decay(self.W_branch2))
-        self.b_branch2 -= learning_rate * grad_b_b2
-        self.W_branch1 -= learning_rate * (grad_W_b1 + decay(self.W_branch1))
-        self.b_branch1 -= learning_rate * grad_b_b1
-
-        self.W_trunk2 -= learning_rate * (grad_W_t2 + decay(self.W_trunk2))
-        self.b_trunk2 -= learning_rate * grad_b_t2
-        self.W_trunk1 -= learning_rate * (grad_W_t1 + decay(self.W_trunk1))
-        self.b_trunk1 -= learning_rate * grad_b_t1
-
-    def save_weights(self, filepath):
-        """Save network weights to file"""
-        np.savez(
-            filepath,
-            W_branch1=self.W_branch1, b_branch1=self.b_branch1,
-            W_branch2=self.W_branch2, b_branch2=self.b_branch2,
-            W_trunk1=self.W_trunk1, b_trunk1=self.b_trunk1,
-            W_trunk2=self.W_trunk2, b_trunk2=self.b_trunk2,
-            W_out=self.W_out, b_out=self.b_out
-        )
-
-    def load_weights(self, filepath):
-        """Load network weights from file"""
-        data = np.load(filepath)
-        self.W_branch1 = data['W_branch1']
-        self.b_branch1 = data['b_branch1']
-        self.W_branch2 = data['W_branch2']
-        self.b_branch2 = data['b_branch2']
-        self.W_trunk1 = data['W_trunk1']
-        self.b_trunk1 = data['b_trunk1']
-        self.W_trunk2 = data['W_trunk2']
-        self.b_trunk2 = data['b_trunk2']
-        self.W_out = data['W_out']
-        self.b_out = data['b_out']
+    __call__ = forward

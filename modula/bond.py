@@ -135,3 +135,30 @@ class Rope(Bond):
     def forward(self, x, w):
         q, k = x
         return self.rotate(q), self.rotate(k)
+
+
+class Select(Bond):
+    """Select a component from a tuple of inputs."""
+
+    def __init__(self, index: int):
+        super().__init__()
+        self.index = index
+        self.smooth = True
+        self.sensitivity = 1
+
+    def forward(self, x, w):
+        return x[self.index]
+
+
+class HadamardProduct(Bond):
+    """Elementwise product of two tensors with identical shape."""
+
+    def __init__(self):
+        super().__init__()
+        self.smooth = True
+        self.sensitivity = 1
+
+    def forward(self, x, w):
+        a, b = x
+        return a * b
+
