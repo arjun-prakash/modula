@@ -17,3 +17,4 @@ slurm_logs/
 *.png
 *.pyc
 *.json
+*.npz

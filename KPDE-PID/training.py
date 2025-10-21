@@ -72,7 +72,7 @@ def _spawn_burst(generator: np.random.Generator, gust_field: GustField, drone_po
     position = drone_pos + distance * direction
 
     if gust_field.storm_mode:
-        intensity = float(generator.uniform(30.0, 70.0))
+        intensity = float(generator.uniform(30.0, 100.0))
         lifetime = float(generator.uniform(1.5, 4.0))
     else:
         intensity = float(generator.uniform(15.0, 40.0))
@@ -252,40 +252,3 @@ def train_single_run(
         weights=weights,
     )
 
-
-def run_method_sweep(
-    methods: Sequence[str],
-    learning_rates: Sequence[float],
-    *,
-    config: TrainingConfig,
-    deeponet_config: Optional[DeepONetConfig] = None,
-    base_seed: Optional[int] = None,
-    save_directory: Optional[PathLike] = None,
-) -> Dict[str, List[TrainingResult]]:
-    deeponet_config = deeponet_config or DeepONetConfig()
-    base_seed = config.seed if base_seed is None else base_seed
-
-    results: Dict[str, List[TrainingResult]] = {method: [] for method in methods}
-    base_key = jax.random.PRNGKey(base_seed)
-
-    for method_idx, method in enumerate(methods):
-        method_key = jax.random.fold_in(base_key, method_idx)
-        for lr_idx, lr in enumerate(learning_rates):
-            run_key = jax.random.fold_in(method_key, lr_idx)
-            save_path = None
-            if save_directory is not None:
-                save_dir = Path(save_directory)
-                save_dir.mkdir(parents=True, exist_ok=True)
-                save_path = save_dir / f"deeponet_{method}_lr{lr:.3g}.npz"
-
-            result = train_single_run(
-                method,
-                config=config,
-                deeponet_config=deeponet_config,
-                learning_rate=lr,
-                rng_key=run_key,
-                save_path=save_path,
-            )
-            results[method].append(result)
-
-    return results

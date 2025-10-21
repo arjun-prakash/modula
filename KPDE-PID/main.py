@@ -5,29 +5,32 @@ main.py - Main entry point for running training and experiments.
 from __future__ import annotations
 
 import argparse
-import json
-from dataclasses import asdict
 from pathlib import Path
 from textwrap import dedent
-from typing import Dict, List, Optional
+from typing import Optional
 
 import matplotlib.pyplot as plt
 
+BASE_DIR = Path(__file__).resolve().parent
+FILES_DIR = BASE_DIR / "files"
+
+
+def resolve_files_path(path: Optional[Path], *, default_name: str) -> Path:
+    """Return a path inside FILES_DIR, preserving relative structure."""
+    candidate = path.expanduser() if path else Path(default_name)
+    if candidate.is_absolute():
+        candidate = Path(candidate.name)
+    return FILES_DIR / candidate
+
+
 from deeponet import DeepONet, DeepONetConfig
-from training import (
-    METHOD_CHOICES,
-    TrainingConfig,
-    TrainingResult,
-    run_method_sweep,
-    train_single_run,
-)
+from training import METHOD_CHOICES, TrainingConfig, TrainingResult, train_single_run
 
 
-def plot_training_history(result: TrainingResult, output_path: Path, show: bool) -> None:
+def plot_training_history(result: TrainingResult, output_path: Path) -> None:
     if not result.loss_history:
         return
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(10, 5))
 
     ax.plot(result.loss_history, label="total", color="steelblue", linewidth=2.5)
@@ -43,39 +46,7 @@ def plot_training_history(result: TrainingResult, output_path: Path, show: bool)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     print(f"\n✓ Training curve saved: {output_path}")
 
-    if show:
-        plt.show()
     plt.close(fig)
-
-
-def serialize_sweep_results(
-    results: Dict[str, List[TrainingResult]],
-    training_config: TrainingConfig,
-    deeponet_config: DeepONetConfig,
-) -> Dict[str, object]:
-    payload: Dict[str, object] = {
-        "training_config": asdict(training_config),
-        "deeponet_config": asdict(deeponet_config),
-        "methods": {},
-    }
-
-    method_payload: Dict[str, List[Dict[str, object]]] = {}
-    for method, runs in results.items():
-        run_entries: List[Dict[str, object]] = []
-        for run in runs:
-            run_entries.append(
-                {
-                    "learning_rate": float(run.learning_rate),
-                    "final_loss": float(run.final_loss),
-                    "loss_history": [float(x) for x in run.loss_history],
-                    "mse_history": [float(x) for x in run.mse_history],
-                    "dyn_history": [float(x) for x in run.dyn_history],
-                }
-            )
-        method_payload[method] = run_entries
-
-    payload["methods"] = method_payload
-    return payload
 
 
 def main() -> None:
@@ -86,7 +57,6 @@ def main() -> None:
             """Examples:
   python main.py --train                                # Train a single run
   python main.py --train --method dualize               # Train with dualize updates
-  python main.py --train --methods descent dualize      # Sweep over methods
   python main.py --compare                              # Run comparison (normal + storm)
   python main.py --multidrone                           # Multi-drone V-stack experiment
   python main.py --all                                  # Train (single method) + run all experiments\n"""
@@ -102,10 +72,8 @@ def main() -> None:
 
     # Training hyperparameters
     parser.add_argument("--method", choices=METHOD_CHOICES, default="descent", help="Training method for a single run")
-    parser.add_argument("--methods", nargs="+", choices=METHOD_CHOICES, help="Optional list of methods for a sweep")
-    parser.add_argument("--learning-rate", type=float, default=5e-3, help="Learning rate for a single run")
-    parser.add_argument("--learning-rates", type=float, nargs="+", help="Learning rates to sweep")
-    parser.add_argument("--steps", type=int, default=600, help="Training steps per run")
+    parser.add_argument("--learning-rate", type=float, default=5e-2, help="Learning rate for a single run")
+    parser.add_argument("--steps", type=int, default=1000, help="Training steps per run")
     parser.add_argument("--batch-size", type=int, default=64, help="Mini-batch size")
     parser.add_argument("--lambda-dyn", type=float, default=0.3, help="Physics loss weight λ")
     parser.add_argument("--target-norm", type=float, default=1.0, help="Target norm for dual updates")
@@ -133,20 +101,22 @@ def main() -> None:
 
     # Outputs
     parser.add_argument("--save-weights", type=Path, default=Path("deeponet_weights.npz"), help="Path to save/load weights")
-    parser.add_argument("--results-path", type=Path, help="Optional JSON path to store sweep metrics")
-    parser.add_argument("--sweep-save-dir", type=Path, help="Optional directory to store sweep weight checkpoints")
-    parser.add_argument("--no-plot", action="store_true", help="Disable interactive plotting")
 
     args = parser.parse_args()
+
+    save_weights_path = resolve_files_path(args.save_weights, default_name="deeponet_weights.npz")
+    training_curve_path = resolve_files_path(Path("training_loss.png"), default_name="training_loss.png")
+
+    comparison_normal_path = resolve_files_path(Path("comparison_normal.png"), default_name="comparison_normal.png")
+    comparison_storm_path = resolve_files_path(Path("comparison_storm.png"), default_name="comparison_storm.png")
+    vstack_normal_path = resolve_files_path(Path("vstack_normal.png"), default_name="vstack_normal.png")
+    vstack_extreme_path = resolve_files_path(Path("vstack_extreme.png"), default_name="vstack_extreme.png")
+
+    args.save_weights = save_weights_path
 
     if not (args.train or args.compare or args.multidrone or args.animated or args.all):
         parser.print_help()
         return
-
-    multi_methods = args.methods and len(args.methods) > 1
-    multi_rates = args.learning_rates and len(args.learning_rates) > 1
-    if (args.compare or args.multidrone or args.animated or args.all) and (multi_methods or multi_rates):
-        parser.error("Experiments require a single trained network. Use --method/--learning-rate or provide --save-weights.")
 
     print("\n" + "=" * 70)
     print(" PHYSICS-INFORMED DEEPONET FOR DRONE GUST CONTROL")
@@ -154,7 +124,6 @@ def main() -> None:
 
     network: Optional[DeepONet] = None
     trained_result: Optional[TrainingResult] = None
-    sweep_results: Optional[Dict[str, List[TrainingResult]]] = None
 
     step_counter = 1
 
@@ -186,66 +155,31 @@ def main() -> None:
             trunk_mass=args.trunk_mass,
         )
 
-        methods = args.methods or [args.method]
-        learning_rates = args.learning_rates or [args.learning_rate]
-
-        if len(methods) > 1 or len(learning_rates) > 1:
-            sweep_results = run_method_sweep(
-                methods,
-                learning_rates,
-                config=training_config,
-                deeponet_config=deeponet_config,
-                base_seed=args.seed,
-                save_directory=args.sweep_save_dir,
-            )
-
-            if args.results_path:
-                payload = serialize_sweep_results(sweep_results, training_config, deeponet_config)
-                args.results_path.parent.mkdir(parents=True, exist_ok=True)
-                args.results_path.write_text(json.dumps(payload, indent=2))
-                print(f"\n✓ Saved sweep metrics: {args.results_path}")
-            else:
-                print("\n✓ Sweep complete.")
-
-            if not (args.compare or args.multidrone or args.animated or args.all):
-                print("\nNo simulations requested. Exiting after sweep.\n")
-                return
-
-            print("\nPlease select a single trained run (or provide --save-weights) before launching experiments.\n")
-            return
-
-        method = methods[0]
-        lr = learning_rates[0]
         trained_result = train_single_run(
-            method,
+            args.method,
             config=training_config,
             deeponet_config=deeponet_config,
-            learning_rate=lr,
-            save_path=args.save_weights,
+            learning_rate=args.learning_rate,
+            save_path=save_weights_path,
         )
 
         network = DeepONet(trained_result.deeponet_config)
         network.set_weights(trained_result.weights)
 
-        if args.save_weights:
-            print(f"\n✓ Saved weights to {args.save_weights}\n")
+        if save_weights_path:
+            print(f"\n✓ Saved weights to {save_weights_path}\n")
 
         if trained_result.loss_history:
-            plot_training_history(trained_result, Path("training_loss.png"), show=not args.no_plot)
+            plot_training_history(trained_result, training_curve_path)
 
         print("\n✓ Training complete!\n")
         step_counter += 1
 
     if network is None:
-        print(f"Loading trained network from {args.save_weights}...")
         network = DeepONet()
-        try:
-            network.load_weights(args.save_weights)
-            print(f"✓ Loaded weights from {args.save_weights}\n")
-        except Exception as exc:  # pragma: no cover - user IO path
-            print(f"✗ Could not load weights from {args.save_weights}: {exc}")
-            print("Please train the network first using --train")
-            return
+        network.load_weights(save_weights_path)
+        print(f"✓ Loaded weights from {save_weights_path}\n")
+
 
     # ========== COMPARISON EXPERIMENTS ==========
     if args.compare or args.all:
@@ -267,11 +201,9 @@ def main() -> None:
         )
 
         fig1 = plot_comparison_analysis(times, tp, tb, gf, storm_mode=False)
-        plt.savefig("comparison_normal.png", dpi=150, bbox_inches="tight")
-        print("✓ Saved: comparison_normal.png")
+        plt.savefig(comparison_normal_path, dpi=150, bbox_inches="tight")
+        print(f"✓ Saved: {comparison_normal_path}")
 
-        if not args.no_plot:
-            plt.show()
         plt.close(fig1)
 
         # Storm mode
@@ -284,11 +216,9 @@ def main() -> None:
         )
 
         fig2 = plot_comparison_analysis(times, tp, tb, gf, storm_mode=True)
-        plt.savefig("comparison_storm.png", dpi=150, bbox_inches="tight")
-        print("✓ Saved: comparison_storm.png")
+        plt.savefig(comparison_storm_path, dpi=150, bbox_inches="tight")
+        print(f"✓ Saved: {comparison_storm_path}")
 
-        if not args.no_plot:
-            plt.show()
         plt.close(fig2)
 
         print("\n✓ Comparison experiments complete!\n")
@@ -321,11 +251,9 @@ def main() -> None:
             num_drones=args.num_drones,
             spacing=1.0,
         )
-        plt.savefig("vstack_normal.png", dpi=150, bbox_inches="tight")
-        print("✓ Saved: vstack_normal.png")
+        plt.savefig(vstack_normal_path, dpi=150, bbox_inches="tight")
+        print(f"✓ Saved: {vstack_normal_path}")
 
-        if not args.no_plot:
-            plt.show()
         plt.close(fig3)
 
         # Extreme wind
@@ -352,11 +280,9 @@ def main() -> None:
             y=0.995,
             color="darkred",
         )
-        plt.savefig("vstack_extreme.png", dpi=150, bbox_inches="tight")
-        print("✓ Saved: vstack_extreme.png")
+        plt.savefig(vstack_extreme_path, dpi=150, bbox_inches="tight")
+        print(f"✓ Saved: {vstack_extreme_path}")
 
-        if not args.no_plot:
-            plt.show()
         plt.close(fig4)
 
         print("\n✓ Multi-drone experiments complete!\n")
@@ -369,19 +295,15 @@ def main() -> None:
     print("\nGenerated files:")
 
     if trained_result is not None:
-        print(f"  • {args.save_weights} (network weights)")
+        print(f"  • {save_weights_path} (network weights)")
         if trained_result.loss_history:
-            print("  • training_loss.png (training curves)")
-    elif sweep_results is not None and args.sweep_save_dir:
-        print(f"  • {args.sweep_save_dir} (sweep weight checkpoints)")
-    if args.results_path and sweep_results is not None:
-        print(f"  • {args.results_path} (sweep metrics)")
+            print(f"  • {training_curve_path} (training curves)")
     if args.compare or args.all:
-        print("  • comparison_normal.png (normal mode comparison)")
-        print("  • comparison_storm.png (storm mode comparison)")
+        print(f"  • {comparison_normal_path} (normal mode comparison)")
+        print(f"  • {comparison_storm_path} (storm mode comparison)")
     if args.multidrone or args.all:
-        print("  • vstack_normal.png (multi-drone formation)")
-        print("  • vstack_extreme.png (extreme wind test)")
+        print(f"  • {vstack_normal_path} (multi-drone formation)")
+        print(f"  • {vstack_extreme_path} (extreme wind test)")
     print("\nFor interactive 3D visualization, open:")
     print("  • 3D Extreme Turbulence Visualization.html (in browser)")
     print("=" * 70 + "\n")
