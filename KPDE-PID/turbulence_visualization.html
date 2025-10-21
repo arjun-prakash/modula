@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepONet Drone Control - REAL PINN Integration</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+            background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
+        }
+        #container {
+            width: 100vw;
+            height: 100vh;
+        }
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 20px;
+            border-radius: 10px;
+            font-size: 13px;
+            line-height: 1.6;
+            max-width: 320px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        #info h2 {
+            margin: 0 0 10px 0;
+            color: #00ff88;
+            font-size: 17px;
+        }
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+            font-size: 12px;
+        }
+        .label {
+            color: #aaa;
+        }
+        .value {
+            color: #fff;
+            font-weight: bold;
+        }
+        .pinn { color: #00aaff; }
+        .baseline { color: #ff4444; }
+        .warning {
+            color: #ff9900;
+            font-weight: bold;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        .status-loading { background: #ff9900; animation: pulse 2s infinite; }
+        .status-ready { background: #00ff88; }
+        .status-error { background: #ff4444; }
+        #controls {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: white;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 15px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        button {
+            background: #00ff88;
+            border: none;
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+            font-size: 13px;
+        }
+        button:hover {
+            background: #00cc66;
+            transform: scale(1.05);
+        }
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .legend {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 15px;
+            border-radius: 10px;
+            color: white;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 8px 0;
+            font-size: 13px;
+        }
+        .legend-color {
+            width: 18px;
+            height: 18px;
+            margin-right: 10px;
+            border-radius: 3px;
+        }
+        #chartContainer {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 450px;
+            height: 250px;
+            background: rgba(0, 0, 0, 0.85);
+            border-radius: 10px;
+            padding: 15px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .chart-title {
+            color: white;
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        canvas {
+            display: block;
+        }
+        .control-section {
+            margin: 10px 0;
+            padding: 8px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 5px;
+        }
+        .control-section h4 {
+            margin: 0 0 8px 0;
+            color: #00ff88;
+            font-size: 12px;
+        }
+        select {
+            width: 100%;
+            padding: 5px;
+            background: rgba(0, 0, 0, 0.5);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 3px;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    
+    <div id="info">
+        <h2>⚠️ REAL PINN INTEGRATION</h2>
+        <div class="metric">
+            <span class="label">PINN Status:</span>
+            <span class="value" id="pinnStatus">
+                <span class="status-indicator status-loading"></span>Loading...
+            </span>
+        </div>
+        <hr style="border-color: rgba(255,255,255,0.2)">
+        <div class="metric">
+            <span class="label">Time:</span>
+            <span class="value" id="time">0.0s</span>
+        </div>
+        <div class="metric">
+            <span class="label">Wind Speed:</span>
+            <span class="value warning" id="windSpeed">0 N</span>
+        </div>
+        <div class="metric">
+            <span class="label">Active Bursts:</span>
+            <span class="value" id="bursts">0</span>
+        </div>
+        <div class="metric">
+            <span class="label">Target Mode:</span>
+            <span class="value" id="targetMode">Stationary</span>
+        </div>
+        <hr style="border-color: rgba(255,255,255,0.2)">
+        <div class="metric">
+            <span class="label pinn">PINN Error:</span>
+            <span class="value pinn" id="pinnError">0.0 m</span>
+        </div>
+        <div class="metric">
+            <span class="label baseline">Baseline Error:</span>
+            <span class="value baseline" id="baseError">0.0 m</span>
+        </div>
+        <div class="metric">
+            <span class="label">Improvement:</span>
+            <span class="value" style="color: #00ff88" id="improvement">0%</span>
+        </div>
+        <hr style="border-color: rgba(255,255,255,0.2)">
+        <div class="metric">
+            <span class="label pinn">PINN Avg Error:</span>
+            <span class="value pinn" id="pinnAvgError">0.0 m</span>
+        </div>
+        <div class="metric">
+            <span class="label baseline">Base Avg Error:</span>
+            <span class="value baseline" id="baseAvgError">0.0 m</span>
+        </div>
+    </div>
+
+    <div class="legend">
+        <h3 style="margin: 0 0 10px 0;">Legend</h3>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #00aaff;"></div>
+            <span>PINN Drone (Real)</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #ff4444;"></div>
+            <span>Baseline Drone</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #ffaa00;"></div>
+            <span>Gust Bursts</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #00ff88;"></div>
+            <span>Target</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #ff00ff;"></div>
+            <span>Target Path</span>
+        </div>
+    </div>
+
+    <div id="controls">
+        <div class="control-section">
+            <h4>🎯 Target Pattern</h4>
+            <select id="targetPattern" onchange="changeTargetPattern()">
+                <option value="stationary">Stationary</option>
+                <option value="circular">Circular</option>
+                <option value="figure8" selected>Figure-8</option>
+                <option value="vertical">Vertical Oscillation</option>
+                <option value="box3d">3D Box</option>
+                <option value="lissajous">Lissajous</option>
+            </select>
+        </div>
+        <button onclick="togglePause()">⏯️ Pause/Resume</button>
+        <button onclick="resetSimulation()">🔄 Reset</button>
+        <button onclick="increaseWind()">💨 More Wind</button>
+    </div>
+
+    <div id="chartContainer">
+        <div class="chart-title">Tracking Error Over Time (Real PINN)</div>
+        <canvas id="errorChart" width="450" height="200"></canvas>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // ===== DEEPONET INTEGRATION =====
+        let deeponetWeights = null;
+        let pinnReady = false;
+
+        // Load trained weights from JSON
+        fetch('deeponet_weights.json')
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Weights file not found');
+                }
+                return response.json();
+            })
+            .then(weights => {
+                deeponetWeights = weights;
+                pinnReady = true;
+                console.log('✓ DeepONet weights loaded successfully!');
+                console.log('  Branch input:', weights.metadata.branch_input_dim);
+                console.log('  Trunk input:', weights.metadata.trunk_input_dim);
+                console.log('  Hidden dim:', weights.metadata.hidden_dim);
+                
+                // Update status indicator
+                const statusElem = document.getElementById('pinnStatus');
+                statusElem.innerHTML = '<span class="status-indicator status-ready"></span>Ready';
+            })
+            .catch(error => {
+                console.error('✗ Failed to load DeepONet weights:', error);
+                console.error('Make sure deeponet_weights.json is in the same folder!');
+                console.error('Run: python export_weights.py');
+                
+                // Update status indicator
+                const statusElem = document.getElementById('pinnStatus');
+                statusElem.innerHTML = '<span class="status-indicator status-error"></span>Error (using fallback)';
+            });
+
+        // Matrix multiplication
+        function matmul(W, x) {
+            const rows = W.length;
+            const result = new Array(rows);
+            for (let i = 0; i < rows; i++) {
+                result[i] = 0;
+                for (let j = 0; j < x.length; j++) {
+                    result[i] += W[i][j] * x[j];
+                }
+            }
+            return result;
+        }
+
+        // Add bias
+        function addBias(vec, bias) {
+            return vec.map((v, i) => v + bias[i]);
+        }
+
+        // ReLU activation
+        function relu(vec) {
+            return vec.map(v => Math.max(0, v));
+        }
+
+        // DeepONet forward pass
+        function deeponetForward(gustFeatures, trunkVec) {
+            if (!pinnReady || !deeponetWeights) {
+                // Fallback to simplified model
+                return null;
+            }
+            
+            try {
+                // Branch network
+                let b1 = matmul(deeponetWeights.W_branch1, gustFeatures);
+                b1 = addBias(b1, deeponetWeights.b_branch1);
+                b1 = relu(b1);
+                
+                let b2 = matmul(deeponetWeights.W_branch2, b1);
+                b2 = addBias(b2, deeponetWeights.b_branch2);
+                b2 = relu(b2);
+                
+                // Trunk network
+                let t1 = matmul(deeponetWeights.W_trunk1, trunkVec);
+                t1 = addBias(t1, deeponetWeights.b_trunk1);
+                t1 = relu(t1);
+                
+                let t2 = matmul(deeponetWeights.W_trunk2, t1);
+                t2 = addBias(t2, deeponetWeights.b_trunk2);
+                t2 = relu(t2);
+                
+                // Combine (element-wise product)
+                const combined = b2.map((b, i) => b * t2[i]);
+                
+                // Output layer
+                let out = matmul(deeponetWeights.W_out, combined);
+                out = addBias(out, deeponetWeights.b_out);
+                
+                return out;
+            } catch (error) {
+                console.error('Error in DeepONet forward pass:', error);
+                return null;
+            }
+        }
+
+        // Encode gust features (matches Python implementation)
+        function encodeGustFeatures(dronePos, gustBursts) {
+            const features = new Array(10).fill(0);
+            
+            const maxBursts = Math.min(2, gustBursts.length);
+            for (let i = 0; i < maxBursts; i++) {
+                const burst = gustBursts[i];
+                const rel = [
+                    burst.position.x - dronePos[0],
+                    burst.position.y - dronePos[1],
+                    burst.position.z - dronePos[2]
+                ];
+                const dist = Math.sqrt(rel[0]**2 + rel[1]**2 + rel[2]**2) + 1e-6;
+                
+                const idx = i * 5;
+                features[idx + 0] = rel[0] / 10.0;
+                features[idx + 1] = rel[1] / 10.0;
+                features[idx + 2] = rel[2] / 10.0;
+                features[idx + 3] = dist / 10.0;
+                features[idx + 4] = Math.min(1.0, burst.userData.intensity / 70.0);
+            }
+            
+            return features;
+        }
+
+        // Encode trunk vector (matches Python implementation)
+        function encodeTrunkVec(pos, vel, time, baseWind) {
+            const t_norm = (time % 10.0) / 10.0;
+            
+            const windNorm = baseWind.map(w => w / 10.0);
+            
+            return [
+                ...pos,      // x, y, z
+                ...vel,      // vx, vy, vz
+                t_norm,      // normalized time
+                ...windNorm  // base wind / 10
+            ];
+        }
+
+        // ===== REST OF THE SIMULATION =====
+        let scene, camera, renderer;
+        let pinnDrone, baselineDrone, target;
+        let pinnTrail = [], baselineTrail = [], targetTrail = [];
+        let bursts = [];
+        let time = 0;
+        let paused = false;
+        
+        let pinnState = { pos: [5, 3, 3], vel: [0, 0, 0] };
+        let baseState = { pos: [5, 3, 3], vel: [0, 0, 0] };
+        let targetPos = [0, 0, 2];
+        let windIntensity = 1.0;
+        let currentTargetPattern = 'figure8';
+
+        const MASS = 1.0;
+        const DRAG = 0.1;
+        const G = 9.81;
+        const DT = 0.03;
+        const BASE_WIND = [12, -8, 3];
+        const KP = 15.0, KI = 0.3, KD = 8.0;
+
+        let pinnPID = { integral: [0, 0, 0], prevError: [0, 0, 0] };
+        let basePID = { integral: [0, 0, 0], prevError: [0, 0, 0] };
+
+        let errorHistory = {
+            times: [],
+            pinnErrors: [],
+            baseErrors: []
+        };
+        const MAX_HISTORY = 300;
+
+        let chartCanvas, chartCtx;
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x0a0a0a, 0.02);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(20, 15, 20);
+            camera.lookAt(0, 0, 2);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setClearColor(0x0a0a0a);
+            document.getElementById('container').appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+            scene.add(ambientLight);
+            
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(10, 20, 10);
+            scene.add(directionalLight);
+
+            const gridHelper = new THREE.GridHelper(40, 40, 0x00ff88, 0x333333);
+            gridHelper.position.y = -0.1;
+            scene.add(gridHelper);
+
+            const pinnGeometry = new THREE.SphereGeometry(0.3, 16, 16);
+            const pinnMaterial = new THREE.MeshPhongMaterial({ 
+                color: 0x00aaff, 
+                emissive: 0x0066aa,
+                shininess: 100 
+            });
+            pinnDrone = new THREE.Mesh(pinnGeometry, pinnMaterial);
+            pinnDrone.position.set(...pinnState.pos);
+            scene.add(pinnDrone);
+
+            const baseGeometry = new THREE.SphereGeometry(0.3, 16, 16);
+            const baseMaterial = new THREE.MeshPhongMaterial({ 
+                color: 0xff4444, 
+                emissive: 0xaa0000,
+                shininess: 100 
+            });
+            baselineDrone = new THREE.Mesh(baseGeometry, baseMaterial);
+            baselineDrone.position.set(...baseState.pos);
+            scene.add(baselineDrone);
+
+            const targetGeometry = new THREE.OctahedronGeometry(0.5);
+            const targetMaterial = new THREE.MeshPhongMaterial({ 
+                color: 0x00ff88,
+                emissive: 0x00aa44,
+                wireframe: false
+            });
+            target = new THREE.Mesh(targetGeometry, targetMaterial);
+            target.position.set(...targetPos);
+            scene.add(target);
+            target.userData = { scale: 0 };
+
+            spawnBurst();
+            spawnBurst();
+
+            chartCanvas = document.getElementById('errorChart');
+            chartCtx = chartCanvas.getContext('2d');
+
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function getTargetPosition(t) {
+            const pattern = currentTargetPattern;
+            
+            switch(pattern) {
+                case 'stationary':
+                    return [0, 0, 2];
+                
+                case 'circular':
+                    const r = 5.0;
+                    const w = 0.3;
+                    return [
+                        r * Math.cos(w * t),
+                        r * Math.sin(w * t),
+                        2.0 + 0.5 * Math.sin(0.5 * t)
+                    ];
+                
+                case 'figure8':
+                    const r8 = 4.5;
+                    const w8 = 0.4;
+                    return [
+                        r8 * Math.sin(w8 * t),
+                        r8 * Math.sin(w8 * t) * Math.cos(w8 * t),
+                        2.0 + 1.0 * Math.sin(0.6 * t)
+                    ];
+                
+                case 'vertical':
+                    return [
+                        0,
+                        0,
+                        2.0 + 3.0 * Math.sin(0.5 * t)
+                    ];
+                
+                case 'box3d':
+                    const phase = (t * 0.3) % 4;
+                    const side = 6.0;
+                    if (phase < 1) {
+                        return [side * phase, side, 2];
+                    } else if (phase < 2) {
+                        return [side, side * (2 - phase), 2 + 2 * (phase - 1)];
+                    } else if (phase < 3) {
+                        return [side * (3 - phase), -side, 4 - 2 * (phase - 2)];
+                    } else {
+                        return [-side, -side + side * 2 * (phase - 3), 2];
+                    }
+                
+                case 'lissajous':
+                    return [
+                        5.0 * Math.sin(0.5 * t),
+                        5.0 * Math.sin(0.35 * t + Math.PI/3),
+                        2.0 + 1.5 * Math.sin(0.7 * t)
+                    ];
+                
+                default:
+                    return [0, 0, 2];
+            }
+        }
+
+        function changeTargetPattern() {
+            currentTargetPattern = document.getElementById('targetPattern').value;
+            document.getElementById('targetMode').textContent = 
+                currentTargetPattern.charAt(0).toUpperCase() + currentTargetPattern.slice(1);
+            
+            const oldTargetTrail = scene.getObjectByName('targetTrail');
+            if (oldTargetTrail) scene.remove(oldTargetTrail);
+            targetTrail = [];
+        }
+
+        function spawnBurst() {
+            if (bursts.length >= 12) return;
+
+            const angle = Math.random() * Math.PI * 2;
+            const phi = Math.random() * Math.PI;
+            const dist = 3 + Math.random() * 8;
+            
+            const avgX = (pinnState.pos[0] + baseState.pos[0]) / 2;
+            const avgY = (pinnState.pos[1] + baseState.pos[1]) / 2;
+            const avgZ = (pinnState.pos[2] + baseState.pos[2]) / 2;
+
+            const x = avgX + dist * Math.sin(phi) * Math.cos(angle);
+            const y = avgY + dist * Math.sin(phi) * Math.sin(angle);
+            const z = Math.max(0.5, avgZ + dist * Math.cos(phi));
+
+            const geometry = new THREE.SphereGeometry(0.4, 8, 8);
+            const material = new THREE.MeshPhongMaterial({ 
+                color: 0xffaa00,
+                emissive: 0xff6600,
+                transparent: true,
+                opacity: 0.8
+            });
+            const burst = new THREE.Mesh(geometry, material);
+            burst.position.set(x, y, z);
+            
+            burst.userData = {
+                intensity: 25 + Math.random() * 40 * windIntensity,
+                lifetime: 1.5 + Math.random() * 2.5,
+                pulseFreq: 3 + Math.random() * 5,
+                age: 0
+            };
+            
+            scene.add(burst);
+            bursts.push(burst);
+        }
+
+        function computeGustForce(pos, time) {
+            let force = [
+                BASE_WIND[0] * windIntensity,
+                BASE_WIND[1] * windIntensity,
+                BASE_WIND[2] * windIntensity
+            ];
+
+            const turbFreq = 0.5;
+            const turbAmp = 5 * windIntensity;
+            force[0] += turbAmp * Math.sin(2 * Math.PI * turbFreq * time);
+            force[1] += turbAmp * Math.cos(2 * Math.PI * turbFreq * time * 1.3);
+            force[2] += turbAmp * Math.sin(2 * Math.PI * turbFreq * time * 0.7);
+
+            bursts.forEach(burst => {
+                const dx = pos[0] - burst.position.x;
+                const dy = pos[1] - burst.position.y;
+                const dz = pos[2] - burst.position.z;
+                const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.001;
+                
+                const pulse = 0.5 * (1 + Math.sin(2 * Math.PI * burst.userData.pulseFreq * time));
+                const mag = burst.userData.intensity * pulse / (1.0 + dist * dist);
+                
+                force[0] += mag * dx / dist;
+                force[1] += mag * dy / dist;
+                force[2] += mag * dz / dist;
+            });
+
+            return force;
+        }
+
+        function pidControl(pos, target, pidState, dt) {
+            const error = [
+                target[0] - pos[0],
+                target[1] - pos[1],
+                target[2] - pos[2]
+            ];
+
+            pidState.integral = pidState.integral.map((int, i) => 
+                Math.max(-5, Math.min(5, int + error[i] * dt))
+            );
+
+            const derivative = error.map((e, i) => 
+                (e - pidState.prevError[i]) / dt
+            );
+
+            pidState.prevError = [...error];
+
+            const force = error.map((e, i) => 
+                Math.max(-50, Math.min(50, 
+                    KP * e + KI * pidState.integral[i] + KD * derivative[i]
+                ))
+            );
+
+            return force;
+        }
+
+        function predictDisturbance(pos, vel, time) {
+            // Calculate base wind with turbulence
+            const turbFreq = 0.5;
+            const turbAmp = 5 * windIntensity;
+            const baseWindWithTurb = [
+                BASE_WIND[0] * windIntensity + turbAmp * Math.sin(2 * Math.PI * turbFreq * time),
+                BASE_WIND[1] * windIntensity + turbAmp * Math.cos(2 * Math.PI * turbFreq * time * 1.3),
+                BASE_WIND[2] * windIntensity + turbAmp * Math.sin(2 * Math.PI * turbFreq * time * 0.7)
+            ];
+            
+            // Encode features
+            const gustFeatures = encodeGustFeatures(pos, bursts);
+            const trunkVec = encodeTrunkVec(pos, vel, time, baseWindWithTurb);
+            
+            // Try to use real PINN
+            const prediction = deeponetForward(gustFeatures, trunkVec);
+            
+            if (prediction !== null) {
+                return prediction;
+            } else {
+                // Fallback: simplified model (60% of true gust)
+                const gustForce = computeGustForce(pos, time);
+                return gustForce.map(f => f * 0.6);
+            }
+        }
+
+        function updateDrone(state, pidState, target, usePINN, dt) {
+            const gustForce = computeGustForce(state.pos, time);
+            let controlForce = pidControl(state.pos, target, pidState, dt);
+
+            if (usePINN) {
+                const prediction = predictDisturbance(state.pos, state.vel, time);
+                controlForce = controlForce.map((c, i) => c - prediction[i]);
+            }
+
+            const gravity = [0, 0, -MASS * G];
+            const drag = state.vel.map(v => -DRAG * v);
+            
+            const totalForce = [
+                controlForce[0] + gustForce[0] + gravity[0] + drag[0],
+                controlForce[1] + gustForce[1] + gravity[1] + drag[1],
+                controlForce[2] + gustForce[2] + gravity[2] + drag[2]
+            ];
+
+            const accel = totalForce.map(f => f / MASS);
+            
+            state.vel = state.vel.map((v, i) => v + accel[i] * dt);
+            state.pos = state.pos.map((p, i) => p + state.vel[i] * dt);
+
+            if (state.pos[2] < 0.3) {
+                state.pos[2] = 0.3;
+                state.vel[2] = Math.max(0, state.vel[2]);
+            }
+        }
+
+        function updateTrails() {
+            const pinnPoint = new THREE.Vector3(...pinnState.pos);
+            if (pinnTrail.length === 0 || pinnPoint.distanceTo(pinnTrail[pinnTrail.length - 1]) > 0.2) {
+                pinnTrail.push(pinnPoint);
+                if (pinnTrail.length > 150) pinnTrail.shift();
+                
+                if (pinnTrail.length > 1) {
+                    const trailGeometry = new THREE.BufferGeometry().setFromPoints(pinnTrail);
+                    const trailMaterial = new THREE.LineBasicMaterial({ 
+                        color: 0x00aaff, 
+                        transparent: true, 
+                        opacity: 0.5,
+                        linewidth: 2
+                    });
+                    const oldTrail = scene.getObjectByName('pinnTrail');
+                    if (oldTrail) scene.remove(oldTrail);
+                    
+                    const trail = new THREE.Line(trailGeometry, trailMaterial);
+                    trail.name = 'pinnTrail';
+                    scene.add(trail);
+                }
+            }
+
+            const basePoint = new THREE.Vector3(...baseState.pos);
+            if (baselineTrail.length === 0 || basePoint.distanceTo(baselineTrail[baselineTrail.length - 1]) > 0.2) {
+                baselineTrail.push(basePoint);
+                if (baselineTrail.length > 150) baselineTrail.shift();
+                
+                if (baselineTrail.length > 1) {
+                    const trailGeometry = new THREE.BufferGeometry().setFromPoints(baselineTrail);
+                    const trailMaterial = new THREE.LineBasicMaterial({ 
+                        color: 0xff4444, 
+                        transparent: true, 
+                        opacity: 0.5,
+                        linewidth: 2
+                    });
+                    const oldTrail = scene.getObjectByName('baseTrail');
+                    if (oldTrail) scene.remove(oldTrail);
+                    
+                    const trail = new THREE.Line(trailGeometry, trailMaterial);
+                    trail.name = 'baseTrail';
+                    scene.add(trail);
+                }
+            }
+
+            if (currentTargetPattern !== 'stationary') {
+                const targetPoint = new THREE.Vector3(...targetPos);
+                if (targetTrail.length === 0 || targetPoint.distanceTo(targetTrail[targetTrail.length - 1]) > 0.3) {
+                    targetTrail.push(targetPoint);
+                    if (targetTrail.length > 200) targetTrail.shift();
+                    
+                    if (targetTrail.length > 1) {
+                        const trailGeometry = new THREE.BufferGeometry().setFromPoints(targetTrail);
+                        const trailMaterial = new THREE.LineBasicMaterial({ 
+                            color: 0xff00ff, 
+                            transparent: true, 
+                            opacity: 0.3,
+                            linewidth: 1
+                        });
+                        const oldTrail = scene.getObjectByName('targetTrail');
+                        if (oldTrail) scene.remove(oldTrail);
+                        
+                        const trail = new THREE.Line(trailGeometry, trailMaterial);
+                        trail.name = 'targetTrail';
+                        scene.add(trail);
+                    }
+                }
+            }
+        }
+
+        function drawErrorChart() {
+            if (!chartCtx || errorHistory.times.length === 0) return;
+
+            const width = chartCanvas.width;
+            const height = chartCanvas.height;
+            const padding = 40;
+            const plotWidth = width - 2 * padding;
+            const plotHeight = height - 2 * padding;
+
+            chartCtx.fillStyle = 'rgba(0, 0, 0, 0)';
+            chartCtx.fillRect(0, 0, width, height);
+
+            const maxError = Math.max(...errorHistory.pinnErrors, ...errorHistory.baseErrors, 5);
+            const minTime = errorHistory.times[0];
+            const maxTime = errorHistory.times[errorHistory.times.length - 1];
+            const timeRange = maxTime - minTime || 1;
+
+            chartCtx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+            chartCtx.lineWidth = 1;
+            chartCtx.beginPath();
+            chartCtx.moveTo(padding, padding);
+            chartCtx.lineTo(padding, height - padding);
+            chartCtx.lineTo(width - padding, height - padding);
+            chartCtx.stroke();
+
+            chartCtx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+            chartCtx.lineWidth = 1;
+            for (let i = 0; i <= 5; i++) {
+                const y = padding + (plotHeight / 5) * i;
+                chartCtx.beginPath();
+                chartCtx.moveTo(padding, y);
+                chartCtx.lineTo(width - padding, y);
+                chartCtx.stroke();
+            }
+
+            chartCtx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+            chartCtx.font = '10px monospace';
+            chartCtx.textAlign = 'right';
+            for (let i = 0; i <= 5; i++) {
+                const y = padding + (plotHeight / 5) * i;
+                const value = (maxError * (5 - i) / 5).toFixed(1);
+                chartCtx.fillText(value + 'm', padding - 5, y + 4);
+            }
+
+            chartCtx.textAlign = 'center';
+            chartCtx.fillText('Time (s)', width / 2, height - 5);
+
+            function drawLine(errors, color, lineWidth = 2) {
+                if (errors.length < 2) return;
+                
+                chartCtx.strokeStyle = color;
+                chartCtx.lineWidth = lineWidth;
+                chartCtx.beginPath();
+                
+                for (let i = 0; i < errors.length; i++) {
+                    const x = padding + (errorHistory.times[i] - minTime) / timeRange * plotWidth;
+                    const y = height - padding - (errors[i] / maxError) * plotHeight;
+                    
+                    if (i === 0) {
+                        chartCtx.moveTo(x, y);
+                    } else {
+                        chartCtx.lineTo(x, y);
+                    }
+                }
+                chartCtx.stroke();
+            }
+
+            drawLine(errorHistory.baseErrors, 'rgba(255, 68, 68, 0.8)', 2.5);
+            drawLine(errorHistory.pinnErrors, 'rgba(0, 170, 255, 0.8)', 2.5);
+
+            chartCtx.textAlign = 'left';
+            chartCtx.fillStyle = '#00aaff';
+            chartCtx.fillRect(width - 120, 15, 15, 3);
+            chartCtx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            chartCtx.fillText('PINN', width - 100, 20);
+            
+            chartCtx.fillStyle = '#ff4444';
+            chartCtx.fillRect(width - 120, 30, 15, 3);
+            chartCtx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            chartCtx.fillText('Baseline', width - 100, 35);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (!paused) {
+                time += DT;
+
+                targetPos = getTargetPosition(time);
+                target.position.set(...targetPos);
+
+                updateDrone(pinnState, pinnPID, targetPos, true, DT);
+                updateDrone(baseState, basePID, targetPos, false, DT);
+
+                pinnDrone.position.set(...pinnState.pos);
+                baselineDrone.position.set(...baseState.pos);
+
+                updateTrails();
+
+                bursts.forEach((burst, index) => {
+                    burst.userData.age += DT;
+                    burst.userData.lifetime -= DT;
+                    
+                    const pulse = 0.5 * (1 + Math.sin(2 * Math.PI * burst.userData.pulseFreq * time));
+                    burst.scale.set(1 + pulse * 0.3, 1 + pulse * 0.3, 1 + pulse * 0.3);
+                    
+                    burst.material.opacity = Math.max(0, burst.userData.lifetime / 3);
+                    
+                    if (burst.userData.lifetime <= 0) {
+                        scene.remove(burst);
+                        bursts.splice(index, 1);
+                    }
+                });
+
+                if (Math.random() < 0.12 * windIntensity) {
+                    spawnBurst();
+                }
+
+                target.userData.scale += 0.05;
+                const targetScale = 1 + 0.1 * Math.sin(target.userData.scale);
+                target.scale.set(targetScale, targetScale, targetScale);
+                target.rotation.y += 0.02;
+
+                const pinnError = Math.sqrt(
+                    Math.pow(pinnState.pos[0] - targetPos[0], 2) +
+                    Math.pow(pinnState.pos[1] - targetPos[1], 2) +
+                    Math.pow(pinnState.pos[2] - targetPos[2], 2)
+                );
+                
+                const baseError = Math.sqrt(
+                    Math.pow(baseState.pos[0] - targetPos[0], 2) +
+                    Math.pow(baseState.pos[1] - targetPos[1], 2) +
+                    Math.pow(baseState.pos[2] - targetPos[2], 2)
+                );
+
+                errorHistory.times.push(time);
+                errorHistory.pinnErrors.push(pinnError);
+                errorHistory.baseErrors.push(baseError);
+
+                if (errorHistory.times.length > MAX_HISTORY) {
+                    errorHistory.times.shift();
+                    errorHistory.pinnErrors.shift();
+                    errorHistory.baseErrors.shift();
+                }
+
+                const avgPinnError = errorHistory.pinnErrors.reduce((a, b) => a + b, 0) / errorHistory.pinnErrors.length;
+                const avgBaseError = errorHistory.baseErrors.reduce((a, b) => a + b, 0) / errorHistory.baseErrors.length;
+
+                const gustForce = computeGustForce(pinnState.pos, time);
+                const windMag = Math.sqrt(gustForce.reduce((sum, f) => sum + f*f, 0));
+                const improvement = ((baseError - pinnError) / baseError * 100).toFixed(1);
+
+                document.getElementById('time').textContent = time.toFixed(1) + 's';
+                document.getElementById('windSpeed').textContent = windMag.toFixed(1) + ' N';
+                document.getElementById('bursts').textContent = bursts.length;
+                document.getElementById('pinnError').textContent = pinnError.toFixed(2) + ' m';
+                document.getElementById('baseError').textContent = baseError.toFixed(2) + ' m';
+                document.getElementById('improvement').textContent = improvement + '%';
+                document.getElementById('pinnAvgError').textContent = avgPinnError.toFixed(2) + ' m';
+                document.getElementById('baseAvgError').textContent = avgBaseError.toFixed(2) + ' m';
+
+                drawErrorChart();
+
+                const radius = 20;
+                const orbitSpeed = currentTargetPattern === 'stationary' ? 0.1 : 0.05;
+                camera.position.x = radius * Math.cos(time * orbitSpeed);
+                camera.position.z = radius * Math.sin(time * orbitSpeed);
+                camera.position.y = 15;
+                
+                const lookX = (pinnState.pos[0] + baseState.pos[0] + targetPos[0]) / 3;
+                const lookY = (pinnState.pos[1] + baseState.pos[1] + targetPos[1]) / 3;
+                const lookZ = (pinnState.pos[2] + baseState.pos[2] + targetPos[2]) / 3;
+                camera.lookAt(lookX, lookY, lookZ);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function togglePause() {
+            paused = !paused;
+        }
+
+        function resetSimulation() {
+            time = 0;
+            pinnState = { pos: [5, 3, 3], vel: [0, 0, 0] };
+            baseState = { pos: [5, 3, 3], vel: [0, 0, 0] };
+            pinnPID = { integral: [0, 0, 0], prevError: [0, 0, 0] };
+            basePID = { integral: [0, 0, 0], prevError: [0, 0, 0] };
+            pinnTrail = [];
+            baselineTrail = [];
+            targetTrail = [];
+            
+            errorHistory = {
+                times: [],
+                pinnErrors: [],
+                baseErrors: []
+            };
+            
+            bursts.forEach(b => scene.remove(b));
+            bursts = [];
+            
+            const trails = scene.children.filter(c => c.name && c.name.includes('Trail'));
+            trails.forEach(t => scene.remove(t));
+
+            targetPos = getTargetPosition(0);
+            target.position.set(...targetPos);
+            
+            console.log('Simulation reset');
+        }
+
+        function increaseWind() {
+            windIntensity = Math.min(windIntensity + 0.3, 3.0);
+            console.log('Wind intensity:', windIntensity);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        document.addEventListener('keydown', (e) => {
+            switch(e.key) {
+                case ' ':
+                    togglePause();
+                    break;
+                case 'r':
+                case 'R':
+                    resetSimulation();
+                    break;
+                case 'w':
+                case 'W':
+                    increaseWind();
+                    break;
+                case '1':
+                    document.getElementById('targetPattern').value = 'stationary';
+                    changeTargetPattern();
+                    break;
+                case '2':
+                    document.getElementById('targetPattern').value = 'circular';
+                    changeTargetPattern();
+                    break;
+                case '3':
+                    document.getElementById('targetPattern').value = 'figure8';
+                    changeTargetPattern();
+                    break;
+                case '4':
+                    document.getElementById('targetPattern').value = 'vertical';
+                    changeTargetPattern();
+                    break;
+                case '5':
+                    document.getElementById('targetPattern').value = 'box3d';
+                    changeTargetPattern();
+                    break;
+                case '6':
+                    document.getElementById('targetPattern').value = 'lissajous';
+                    changeTargetPattern();
+                    break;
+            }
+        });
+
+        console.log('='.repeat(70));
+        console.log('REAL PINN 3D VISUALIZATION');
+        console.log('='.repeat(70));
+        console.log('PINN Status: ' + (pinnReady ? 'Using trained network ✓' : 'Loading...'));
+        console.log('\nCONTROLS:');
+        console.log('SPACE     - Pause/Resume');
+        console.log('R         - Reset simulation');
+        console.log('W         - Increase wind intensity');
+        console.log('1-6       - Change target pattern');
+        console.log('='.repeat(70));
+    </script>
+</body>
+</html>
