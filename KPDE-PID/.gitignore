@@ -1,5 +1,0 @@
-env/
-.python-version
-__pycache__/
-*.png
-*.npz
