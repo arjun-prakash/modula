@@ -72,7 +72,7 @@ def _spawn_burst(generator: np.random.Generator, gust_field: GustField, drone_po
     position = drone_pos + distance * direction
 
     if gust_field.storm_mode:
-        intensity = float(generator.uniform(30.0, 100.0))
+        intensity = float(generator.uniform(50.0, 120.0))
         lifetime = float(generator.uniform(1.5, 4.0))
     else:
         intensity = float(generator.uniform(15.0, 40.0))

@@ -13,14 +13,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-try:
-    from modula.atom import Bias, Linear
-    from modula.bond import HadamardProduct, ReLU, Select
-    from modula.abstract import Module
-except ModuleNotFoundError:  # pragma: no cover - fallback for source tree execution
-    from modula.modula.atom import Bias, Linear
-    from modula.modula.bond import HadamardProduct, ReLU, Select
-    from modula.modula.abstract import Module
+from modula.atom import Bias, Linear
+from modula.bond import HadamardProduct, ReLU, Select
+from modula.abstract import Module
+
 
 ArrayLike = Union[np.ndarray, jnp.ndarray]
 PathLike = Union[str, Path]
@@ -124,9 +120,7 @@ class DeepONet:
     # ------------------------------------------------------------------
     # Weight management
     # ------------------------------------------------------------------
-    def initialize(self, key: Optional[jax.Array] = None) -> List[jnp.ndarray]:
-        if key is None:
-            key = jax.random.PRNGKey(0)
+    def initialize(self, key: [jax.Array]) -> List[jnp.ndarray]:
         self._weights = self.model.initialize(key)
         return self._weights
 
@@ -171,16 +165,16 @@ class DeepONet:
             self._weights = weights
         return self.weights
 
-    # # ------------------------------------------------------------------
-    # # Inference helpers
-    # # ------------------------------------------------------------------
-    # def apply(self, gust_features: ArrayLike, trunk_vec: ArrayLike, *, weights: Optional[Sequence[ArrayLike]] = None) -> jnp.ndarray:
-    #     model_weights = _as_jax(weights or self.weights)
-    #     gf, tv = _normalise_inputs(gust_features, trunk_vec)
-    #     return self.model((gf, tv), model_weights)
+    # ------------------------------------------------------------------
+    # Inference helpers
+    # ------------------------------------------------------------------
+    def apply(self, gust_features: ArrayLike, trunk_vec: ArrayLike, *, weights: Optional[Sequence[ArrayLike]] = None) -> jnp.ndarray:
+        model_weights = _as_jax(weights or self.weights)
+        gf, tv = _normalise_inputs(gust_features, trunk_vec)
+        return self.model((gf, tv), model_weights)
 
-    # def forward(self, gust_features: ArrayLike, trunk_vec: ArrayLike, *, weights: Optional[Sequence[ArrayLike]] = None) -> np.ndarray:
-    #     output = self.apply(gust_features, trunk_vec, weights=weights)
-    #     return np.asarray(output)
+    def forward(self, gust_features: ArrayLike, trunk_vec: ArrayLike, *, weights: Optional[Sequence[ArrayLike]] = None) -> np.ndarray:
+        output = self.apply(gust_features, trunk_vec, weights=weights)
+        return np.asarray(output)
 
-    # __call__ = forward
+    __call__ = forward
