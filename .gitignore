@@ -18,3 +18,4 @@ slurm_logs/
 *.pyc
 *.json
 *.npz
+*.html
