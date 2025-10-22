@@ -17,8 +17,12 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "jax>=0.5.0"
+    "jax[cuda12]>=0.4.30",
+    "matplotlib>=3.9.4",
+    "pyflyt>=0.21.0",
+    "tqdm>=4.67.1",
 ]
+
 
 [tool.setuptools]
 packages = ["modula"]

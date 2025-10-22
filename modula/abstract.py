@@ -275,6 +275,14 @@ class TupleModule(Module):
             w = w[m.atoms:]
         return projected_w
 
+    def retract(self, w):
+        retracted_w = []
+        for m in self.children:
+            retracted_m = m.retract(w[:m.atoms])
+            retracted_w += retracted_m
+            w = w[m.atoms:]
+        return retracted_w
+
     def dualize(self, grad_w, target_norm=1.0):
         if self.mass > 0:
             d_w = []
