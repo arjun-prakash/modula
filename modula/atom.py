@@ -204,7 +204,7 @@ class Linear(Atom):
 
     def retract(self, w):
         weight = w[0]
-        weight = matrix_sign(weight)
+        weight = matrix_sign(weight) #should this be scaled? * jnp.sqrt(self.fanout / self.fanin)
         return [weight]
 
     def dualize(self, grad_w, target_norm=1.0):
