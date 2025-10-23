@@ -131,7 +131,8 @@ def train_permuted_sequence(
                     beta=0.9,
                 )
                 weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
-                weights = [matrix_sign(weight_matrix) for weight_matrix in weights]
+                #weights = [matrix_sign(weight_matrix) for weight_matrix in weights]
+                weights = model.retract(weights)
 
             elif method == "dualize":
                 directions = model.dualize(grad_weights, target_norm=target_norm)

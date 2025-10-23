@@ -13,6 +13,7 @@ examples/.ipynb_checkpoints/
 examples/data/*
 !examples/data/*.py
 
+paper/
 slurm_logs/
 *.png
 *.pyc
