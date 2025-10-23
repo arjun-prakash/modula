@@ -358,6 +358,75 @@ class Embed(Atom):
         d_weight = jnp.nan_to_num(d_weight)
         return [d_weight]
 
+class Conv2D(Atom):
+    # no stride and padding for simplicity
+    def __init__(self, d_in, d_out, kernel_size):
+        super().__init__()
+        self.d_in  = d_in
+        self.d_out = d_out
+        self.k = kernel_size # add kernel size
+        self.smooth = True
+        self.mass = 1 # based on paper, this is hyperparameter, but kept as 1 in consistency w. Linear
+        self.sensitivity = 1
+
+    def forward(self, x, w):
+        # x shape is [N, H, W, C]
+        weights = w[0]  # shape is [k, k, d_in, d_out]
+
+        return jax.lax.conv_general_dilated(
+            lhs=x,
+            rhs=weights,
+            window_strides=(1,1),
+            padding="SAME",
+            dimension_numbers=('NHWC', 'HWIO', 'NHWC')
+        )
+
+    def initialize(self, key):
+        # Create weights directly in [k, k, d_in, d_out] format
+        shape = (self.k, self.k, self.d_in, self.d_out)
+        weight = jax.random.normal(key, shape=shape)
+
+        # Orthogonalize over [d_in, d_out] at each [k, k] position
+        # Apply orthogonalize to axis (2, 3) which are [d_in, d_out]
+        def ortho_at_position(w_slice):
+            # w_slice shape: [d_in, d_out]
+            return orthogonalize(w_slice)
+        
+        # Vectorize over the spatial dimensions (axes 0 and 1)
+        vectorized_ortho = jax.vmap(jax.vmap(ortho_at_position, in_axes=0, out_axes=0), in_axes=0, out_axes=0)
+        
+        # Mod. norm p17: scale factor for normalized weights
+        scale_factor = jnp.sqrt(self.d_out / self.d_in) / (self.k**2)
+        
+        weight = vectorized_ortho(weight) * scale_factor
+
+        return [weight]
+
+    def project(self, w):
+        weight = w[0]  # shape is [k, k, d_in, d_out]
+        
+        # Define a function to apply at each spatial position
+        def project_at_position(w_slice):
+            # w_slice shape: [d_in, d_out]
+            return orthogonalize(w_slice) * jnp.sqrt(self.d_out / self.d_in) / (self.k**2)
+        
+        # Vectorize over spatial dimensions
+        vectorized_project = jax.vmap(jax.vmap(project_at_position, in_axes=0, out_axes=0), in_axes=0, out_axes=0)
+        
+        return [vectorized_project(weight)]
+
+    def dualize(self, grad_w, target_norm=1.0):
+        grad = grad_w[0]  # shape is [k, k, d_in, d_out]
+        
+        # Define a function to apply at each spatial position
+        def dualize_at_position(g_slice):
+            # g_slice shape: [d_in, d_out]
+            return orthogonalize(g_slice) * jnp.sqrt(self.d_out / self.d_in) / (self.k**2) * target_norm
+
+        # Vectorize over spatial dimensions
+        vectorized_dualize = jax.vmap(jax.vmap(dualize_at_position, in_axes=0, out_axes=0), in_axes=0, out_axes=0)
+        
+        return [vectorized_dualize(grad)]
 
 if __name__ == "__main__":
 
