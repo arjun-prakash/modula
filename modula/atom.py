@@ -98,7 +98,7 @@ class Conv2D(Atom):
         self.d_out = d_out
         self.k = kernel_size # add kernel size
         self.smooth = True
-        self.mass = 1 
+        self.mass = 1 # based on paper, this is hyperparameter, but kept as 1 in consistency w. Linear
         self.sensitivity = 1
 
     def forward(self, x, w):
@@ -114,60 +114,51 @@ class Conv2D(Atom):
         )
 
     def initialize(self, key):
-        shape = (self.d_in, self.d_out, self.k, self.k)
+        # Create weights directly in [k, k, d_in, d_out] format
+        shape = (self.k, self.k, self.d_in, self.d_out)
         weight = jax.random.normal(key, shape=shape)
 
-        vectorized_ortho = jax.vmap(
-            jax.vmap(orthogonalize, in_axes=2, out_axes=2),
-            in_axes=3, 
-            out_axes=3
-        )
-
+        # Orthogonalize over [d_in, d_out] at each [k, k] position
+        # Apply orthogonalize to axis (2, 3) which are [d_in, d_out]
+        def ortho_at_position(w_slice):
+            # w_slice shape: [d_in, d_out]
+            return orthogonalize(w_slice)
+        
+        # Vectorize over the spatial dimensions (axes 0 and 1)
+        vectorized_ortho = jax.vmap(jax.vmap(ortho_at_position, in_axes=0, out_axes=0), in_axes=0, out_axes=0)
+        
         # Mod. norm p17: scale factor for normalized weights
-        scale_factor = jnp.sqrt(self.d_out / self.d_in) / self.k
-
+        scale_factor = jnp.sqrt(self.d_out / self.d_in) / (self.k**2)
+        
         weight = vectorized_ortho(weight) * scale_factor
 
-        # Permute weights to [k, k, d_in, d_out] for jax conv
-        weight_permuted = jnp.transpose(weight, (2, 3, 0, 1))
-
-        return [weight_permuted]
+        return [weight]
 
     def project(self, w):
         weight = w[0]  # shape is [k, k, d_in, d_out]
         
-        # Define a function to apply to each spatial slice
-        def project_slice(g):
-            return orthogonalize(g) * jnp.sqrt(self.d_out / self.d_in) / (self.k**2)
+        # Define a function to apply at each spatial position
+        def project_at_position(w_slice):
+            # w_slice shape: [d_in, d_out]
+            return orthogonalize(w_slice) * jnp.sqrt(self.d_out / self.d_in) / (self.k**2)
         
-        weight_transposed = jnp.transpose(weight, (2, 3, 0, 1))
+        # Vectorize over spatial dimensions
+        vectorized_project = jax.vmap(jax.vmap(project_at_position, in_axes=0, out_axes=0), in_axes=0, out_axes=0)
         
-        vectorized_project = jax.vmap(jax.vmap(project_slice, in_axes=2, out_axes=2), in_axes=3, out_axes=3)
-        
-        weight_projected = vectorized_project(weight_transposed)
-        weight_projected = jnp.transpose(weight_projected, (2, 3, 0, 1))
-        
-        return [weight_projected]
+        return [vectorized_project(weight)]
 
     def dualize(self, grad_w, target_norm=1.0):
         grad = grad_w[0]  # shape is [k, k, d_in, d_out]
         
-        # Transpose to [d_in, d_out, k, k] for orthogonalization
-        grad_transposed = jnp.transpose(grad, (2, 3, 0, 1))
-        
-        # Modular duality P7, example 7
-        # Define a function to apply to each spatial slice
-        def dualize_slice(g):
-            return orthogonalize(g) * jnp.sqrt(self.d_out / self.d_in) / (self.k**2) * target_norm
+        # Define a function to apply at each spatial position
+        def dualize_at_position(g_slice):
+            # g_slice shape: [d_in, d_out]
+            return orthogonalize(g_slice) * jnp.sqrt(self.d_out / self.d_in) / (self.k**2) * target_norm
 
-        # Create a vectorized version that maps over spatial dimensions
-        vectorized_dualize = jax.vmap(jax.vmap(dualize_slice, in_axes=2, out_axes=2), in_axes=3, out_axes=3)
-
-        # Apply dualization and transpose back to [k, k, d_in, d_out]
-        d_weight = vectorized_dualize(grad_transposed)
-        d_weight = jnp.transpose(d_weight, (2, 3, 0, 1))
+        # Vectorize over spatial dimensions
+        vectorized_dualize = jax.vmap(jax.vmap(dualize_at_position, in_axes=0, out_axes=0), in_axes=0, out_axes=0)
         
-        return [d_weight]
+        return [vectorized_dualize(grad)]
 
 if __name__ == "__main__":
 
