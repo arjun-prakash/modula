@@ -410,6 +410,72 @@ class Conv2D(Atom):
         out = self._per_slice(grad, matrix_sign)
         return [self._scale(target_norm) * out]
 
+    def retract(self, w):
+        # identical to project; exposed to match the model API
+        return self.project(w)
+
+    def init_dual_state(self, w):
+        """
+        One Lambda per spatial slice for column-orthonormality on each [d_in, d_out] slice:
+            C_ij(W) = W_ij^T W_ij - s^2 I_{d_out}
+        Lambda shape: [k, k, d_out, d_out]
+        """
+        if w:
+            dtype = w[0].dtype
+        else:
+            dtype = jnp.float32
+        lam_shape = (self.k, self.k, self.d_out, self.d_out)
+        lam0 = jnp.zeros(lam_shape, dtype=dtype)
+        vel0 = jnp.zeros_like(lam0)
+        return [(lam0, vel0)]
+
+    def online_dual_ascent(
+        self,
+        state,
+        w,
+        grad_w,
+        *,
+        target_norm: float = 1.0,
+        alpha: float = 1e-2,
+        beta: float = 0.9,
+    ):
+        """
+        Per-slice dual ascent on the Stiefel manifold:
+            - maintains Lambda and its velocity for each spatial position
+            - returns a tangent direction with the same shape as the weights
+        """
+        weight = w[0]         # [k, k, d_in, d_out]
+        grad = grad_w[0]      # [k, k, d_in, d_out]
+
+        if not state:
+            lam, vel = self.init_dual_state(w)[0]
+        else:
+            lam, vel = state[0]
+
+        alpha = jnp.asarray(alpha, dtype=weight.dtype)
+        beta = jnp.asarray(beta, dtype=weight.dtype)
+        target_scale = jnp.asarray(self._scale(target_norm), dtype=weight.dtype)
+
+        def per_slice(weight_slice, grad_slice, lam_slice, vel_slice):
+            tangent_slice, lam_next_slice, vel_next_slice = _online_dual_ascent_step(
+                weight_slice,
+                grad_slice,
+                lam_slice,
+                vel_slice,
+                target_norm=target_scale,
+                alpha=alpha,
+                beta=beta,
+            )
+            return tangent_slice, lam_next_slice, vel_next_slice
+
+        tangent, lam_next, vel_next = jax.vmap(
+            jax.vmap(per_slice, in_axes=(0, 0, 0, 0), out_axes=(0, 0, 0)),
+            in_axes=(0, 0, 0, 0),
+            out_axes=(0, 0, 0),
+        )(weight, grad, lam, vel)
+
+        return [tangent], [(lam_next, vel_next)]
+
 
 
 
