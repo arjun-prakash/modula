@@ -31,6 +31,9 @@ class Module:
         self.forward = jax.jit(self.forward)
         self.project = jax.jit(self.project)
         self.dualize = jax.jit(self.dualize)
+        self.dual_ascent = jax.jit(self.dual_ascent)
+        self.init_dual_state = jax.jit(self.init_dual_state)
+        self.online_dual_ascent = jax.jit(self.online_dual_ascent)
 
     def forward(self, x, w):
         # Input and weight list --> output
@@ -44,9 +47,30 @@ class Module:
         # Return a weight list.
         raise NotImplementedError
 
+    def retract(self, w):
+        # Return a weight list.
+        raise NotImplementedError
+
     def dualize(self, grad_w, target_norm):
         # Weight gradient list and number --> normalized weight gradient list
         raise NotImplementedError
+
+    def dual_ascent(self, w, grad_w, target_norm):
+        """Return tangent steps produced by a manifold dual-ascent routine."""
+
+        raise NotImplementedError
+
+    def init_dual_state(self, w):
+        """Return a pytree of dual state matching the module's atoms."""
+
+        raise NotImplementedError
+
+    def online_dual_ascent(self, state, w, grad_w, *, target_norm=1.0, alpha=1e-2, beta=0.9):
+        """Perform a single dual-ascent step and return (tangent, new_state)."""
+
+        raise NotImplementedError
+
+
 
     def __matmul__(self, other):
         if isinstance(other, tuple):
@@ -89,8 +113,21 @@ class Bond(Module):
     def project(self, w):
         return []
 
+    def retract(self, w):
+        return []
+
     def dualize(self, grad_w, target_norm=1.0):
         return []
+
+    def dual_ascent(self, w, grad_w, target_norm=1.0):
+        return []
+
+    def init_dual_state(self, w):
+        return []
+
+    def online_dual_ascent(self, state, w, grad_w, *, target_norm=1.0, alpha=1e-2, beta=0.9):
+        return [], state
+
 
 class CompositeModule(Module):
     def __init__(self, m1, m0):
@@ -122,6 +159,12 @@ class CompositeModule(Module):
         w1 = w[m0.atoms:]
         return m0.project(w0) + m1.project(w1)
 
+    def retract(self, w):
+        m0, m1 = self.children
+        w0 = w[:m0.atoms]
+        w1 = w[m0.atoms:]
+        return m0.retract(w0) + m1.retract(w1)
+
     def dualize(self, grad_w, target_norm=1.0):
         if self.mass > 0:
             m0, m1 = self.children
@@ -132,6 +175,72 @@ class CompositeModule(Module):
         else:
             d_w = [0 * grad_weight for grad_weight in grad_w]
         return d_w
+
+
+    def dual_ascent(self, w, grad_w, target_norm=1.0):
+        if self.mass > 0:
+            m0, m1 = self.children
+            w0, w1 = w[:m0.atoms], w[m0.atoms:]
+            grad_w0, grad_w1 = grad_w[:m0.atoms], grad_w[m0.atoms:]
+
+            tangents0 = m0.dual_ascent(
+                w0,
+                grad_w0,
+                target_norm=target_norm * m0.mass / self.mass / m1.sensitivity,
+            )
+            tangents1 = m1.dual_ascent(
+                w1,
+                grad_w1,
+                target_norm=target_norm * m1.mass / self.mass,
+            )
+
+            tangents = tangents0 + tangents1
+        else:
+            tangents = [0 * grad_weight for grad_weight in grad_w]
+
+        return tangents
+
+    def init_dual_state(self, w):
+        m0, m1 = self.children
+        w0 = w[:m0.atoms]
+        w1 = w[m0.atoms:]
+        state0 = m0.init_dual_state(w0)
+        state1 = m1.init_dual_state(w1)
+        return state0 + state1
+
+    def online_dual_ascent(self, state, w, grad_w, *, target_norm=1.0, alpha=1e-2, beta=0.9):
+        if self.mass > 0:
+            m0, m1 = self.children
+            state0, state1 = state[:m0.atoms], state[m0.atoms:]
+            w0, w1 = w[:m0.atoms], w[m0.atoms:]
+            grad_w0, grad_w1 = grad_w[:m0.atoms], grad_w[m0.atoms:]
+
+            tangents0, state0_next = m0.online_dual_ascent(
+                state0,
+                w0,
+                grad_w0,
+                target_norm=target_norm * m0.mass / self.mass / m1.sensitivity,
+                alpha=alpha,
+                beta=beta,
+            )
+            tangents1, state1_next = m1.online_dual_ascent(
+                state1,
+                w1,
+                grad_w1,
+                target_norm=target_norm * m1.mass / self.mass,
+                alpha=alpha,
+                beta=beta,
+            )
+
+            tangents = tangents0 + tangents1
+            new_state = state0_next + state1_next
+        else:
+            tangents = [0 * grad_weight for grad_weight in grad_w]
+            new_state = state
+
+        return tangents, new_state
+
+
 
 class TupleModule(Module):
     def __init__(self, python_tuple_of_modules):
@@ -166,6 +275,14 @@ class TupleModule(Module):
             w = w[m.atoms:]
         return projected_w
 
+    def retract(self, w):
+        retracted_w = []
+        for m in self.children:
+            retracted_m = m.retract(w[:m.atoms])
+            retracted_w += retracted_m
+            w = w[m.atoms:]
+        return retracted_w
+
     def dualize(self, grad_w, target_norm=1.0):
         if self.mass > 0:
             d_w = []
@@ -177,6 +294,61 @@ class TupleModule(Module):
         else:
             d_w = [0 * grad_weight for grad_weight in grad_w]
         return d_w
+
+
+    def dual_ascent(self, w, grad_w, target_norm=1.0):
+        if self.mass > 0:
+            tangents = []
+            for m in self.children:
+                w_m = w[:m.atoms]
+                grad_w_m = grad_w[:m.atoms]
+                tangents_m = m.dual_ascent(
+                    w_m,
+                    grad_w_m,
+                    target_norm=target_norm * m.mass / self.mass,
+                )
+                tangents += tangents_m
+                w = w[m.atoms:]
+                grad_w = grad_w[m.atoms:]
+        else:
+            tangents = [0 * grad_weight for grad_weight in grad_w]
+        return tangents
+
+    def init_dual_state(self, w):
+        state = []
+        for m in self.children:
+            state_m = m.init_dual_state(w[:m.atoms])
+            state += state_m
+            w = w[m.atoms:]
+        return state
+
+    def online_dual_ascent(self, state, w, grad_w, *, target_norm=1.0, alpha=1e-2, beta=0.9):
+        if self.mass > 0:
+            tangents = []
+            new_state = []
+            for m in self.children:
+                state_m = state[:m.atoms]
+                w_m = w[:m.atoms]
+                grad_w_m = grad_w[:m.atoms]
+                tangents_m, state_m_next = m.online_dual_ascent(
+                    state_m,
+                    w_m,
+                    grad_w_m,
+                    target_norm=target_norm * m.mass / self.mass,
+                    alpha=alpha,
+                    beta=beta,
+                )
+                tangents += tangents_m
+                new_state += state_m_next
+                state = state[m.atoms:]
+                w = w[m.atoms:]
+                grad_w = grad_w[m.atoms:]
+        else:
+            tangents = [0 * grad_weight for grad_weight in grad_w]
+            new_state = state
+        return tangents, new_state
+
+    
 
 class Identity(Bond):
     def __init__(self):

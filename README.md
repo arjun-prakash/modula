@@ -17,9 +17,10 @@ pip install git+https://github.com/modula-systems/modula.git
 Or you can clone the repository and install locally:
 
 ```bash
+uv init project_name
 git clone https://github.com/modula-systems/modula.git
 cd modula
-pip install -e .
+uv pip install -e .
 ```
 
 # Functionality
@@ -59,6 +60,24 @@ And after the weight update, we can project the weights back to their natural co
 
 ```python
 weights = mlp.project(weights)
+```
+
+Also added online_manifold (for linear layers):
+```
+  dual_alpha = 2e-5
+  dual_beta = 0.9
+  dual_state = model.init_dual_state(weights) 
+
+  tangents, dual_state = model.online_dual_ascent(
+                    dual_state,
+                    weights,
+                    grad_weights,
+                    target_norm=1,
+                    alpha=dual_alpha,
+                    beta=dual_beta,
+                )
+  weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
+  weights = [matrix_sign(weight_matrix) for weight_matrix in weights]  # retraction
 ```
 
 In short, Modula lets us think about the weight space of our neural network as a somewhat classical optimization space, complete with duality and projection operations.
