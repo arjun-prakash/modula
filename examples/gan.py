@@ -10,29 +10,80 @@ import numpy as np
 from tqdm import trange
 
 from data.mnist import load_mnist
-from modula.atom import Linear, matrix_sign
-from modula.bond import ReLU
+from modula.abstract import Bond
+from modula.atom import Linear, Conv2D
+from modula.bond import ReLU, Flatten
 
 METHOD_CHOICES = ("manifold", "manifold_online", "dualize", "descent")
 
 
+class Reshape(Bond):
+    """Bond to reshape flat vectors back into image grids."""
+
+    def __init__(self, target_shape: Tuple[int, ...]):
+        super().__init__()
+        self.target_shape = target_shape
+        self.smooth = True
+        self.sensitivity = 1
+
+    def forward(self, x, w):
+        batch = x.shape[0]
+        return jnp.reshape(x, (batch, *self.target_shape))
+
+
+class Tanh(Bond):
+    """Elementwise tanh to keep generator outputs in [-1, 1]."""
+
+    def __init__(self):
+        super().__init__()
+        self.smooth = True
+        self.sensitivity = 1
+
+    def forward(self, x, w):
+        return jnp.tanh(x)
+
+
 def prepare_data() -> jnp.ndarray:
     train_images, _, _, _ = load_mnist(normalize=True)
-    images = jnp.asarray(train_images, dtype=jnp.float32)
-    images = images.reshape(images.shape[0], -1)
+    images = jnp.asarray(train_images, dtype=jnp.float32)[..., None]
     images = images * 2.0 - 1.0  # scale to [-1, 1]
     return images
 
 
-def build_model(input_dim: int, output_dim: int, width: int):
-    model = Linear(output_dim, width)
-    model @= ReLU() @ Linear(width, width)
-    model @= ReLU() @ Linear(width, 2*width)
-    model @= ReLU() @ Linear(2*width, width//2)
-    model @= ReLU() @ Linear(width//2, width)
-    model @= ReLU() @ Linear(width, input_dim)
-    model.jit()
-    return model
+def build_generator(latent_dim: int, image_shape: Tuple[int, int, int], hidden_dim: int, conv_channels: int = 32):
+    height, width, channels = image_shape
+    base_channels = conv_channels
+    flatten_dim = height * width * base_channels
+
+    generator = Tanh()
+    generator @= Conv2D(base_channels, channels, kernel_size=3)
+    generator @= ReLU()
+    generator @= Conv2D(base_channels, base_channels, kernel_size=3)
+    generator @= ReLU()
+    generator @= Reshape((height, width, base_channels))
+    generator @= Linear(flatten_dim, hidden_dim)
+    generator @= ReLU()
+    generator @= Linear(hidden_dim, latent_dim)
+    generator.jit()
+    return generator
+
+
+def build_discriminator(image_shape: Tuple[int, int, int], hidden_dim: int, conv_channels: int = 32):
+    height, width, channels = image_shape
+    conv1_channels = conv_channels
+    conv2_channels = max(conv_channels * 2, conv_channels)
+    flatten_dim = height * width * conv2_channels
+
+    discriminator = Linear(1, hidden_dim)
+    discriminator @= ReLU()
+    discriminator @= Linear(hidden_dim, flatten_dim)
+    discriminator @= Flatten()
+    discriminator @= ReLU()
+    discriminator @= Conv2D(conv1_channels, conv2_channels, kernel_size=3)
+    discriminator @= ReLU()
+    discriminator @= Conv2D(channels, conv1_channels, kernel_size=3)
+    discriminator.jit()
+    return discriminator
 
 
 def sample_real_batch(key: jax.Array, batch_size: int, dataset: jnp.ndarray) -> jnp.ndarray:
@@ -108,7 +159,7 @@ def train_single_run(
         if method == "manifold":
             tangents = discriminator.dual_ascent(disc_weights, disc_grads, target_norm=target_norm)
             disc_weights = [w - learning_rate * t for w, t in zip(disc_weights, tangents)]
-            disc_weights = [matrix_sign(weight_matrix) for weight_matrix in disc_weights]
+            disc_weights = discriminator.retract(disc_weights)
         elif method == "manifold_online":
             tangents, disc_dual_state = discriminator.online_dual_ascent(
                 disc_dual_state,
@@ -119,7 +170,7 @@ def train_single_run(
                 beta=dual_beta,
             )
             disc_weights = [w - learning_rate * t for w, t in zip(disc_weights, tangents)]
-            disc_weights = [matrix_sign(weight_matrix) for weight_matrix in disc_weights]
+            disc_weights = discriminator.retract(disc_weights)
         elif method == "dualize":
             directions = discriminator.dualize(disc_grads, target_norm=target_norm)
             disc_weights = [w - learning_rate * direction for w, direction in zip(disc_weights, directions)]
@@ -133,7 +184,7 @@ def train_single_run(
         if method == "manifold":
             tangents = generator.dual_ascent(gen_weights, gen_grads, target_norm=target_norm)
             gen_weights = [w - learning_rate * t for w, t in zip(gen_weights, tangents)]
-            gen_weights = [matrix_sign(weight_matrix) for weight_matrix in gen_weights]
+            gen_weights = generator.retract(gen_weights)
         elif method == "manifold_online":
             tangents, gen_dual_state = generator.online_dual_ascent(
                 gen_dual_state,
@@ -144,7 +195,7 @@ def train_single_run(
                 beta=dual_beta,
             )
             gen_weights = [w - learning_rate * t for w, t in zip(gen_weights, tangents)]
-            gen_weights = [matrix_sign(weight_matrix) for weight_matrix in gen_weights]
+            gen_weights = generator.retract(gen_weights)
         elif method == "dualize":
             directions = generator.dualize(gen_grads, target_norm=target_norm)
             gen_weights = [w - learning_rate * direction for w, direction in zip(gen_weights, directions)]
@@ -224,20 +275,31 @@ def save_samples(
     for idx, (method, run) in enumerate(best_runs.items()):
         key = jax.random.PRNGKey(seed + idx)
         noise = sample_latent(key, grid_size * grid_size, latent_dim)
-        flat_images = generator(noise, run["generator_weights"])
-        flat_images = np.asarray(flat_images)
-        image_dim = flat_images.shape[-1]
-        side = int(np.sqrt(image_dim))
-        side = side if side * side == image_dim else image_dim
-        images = flat_images.reshape(grid_size * grid_size, side, -1)
-        if images.shape[-1] == 1:
-            images = images.reshape(grid_size * grid_size, side)
-        images = (images + 1.0) / 2.0
+        generated = generator(noise, run["generator_weights"])
+        generated = np.asarray(generated)
+        generated = np.clip((generated + 1.0) / 2.0, 0.0, 1.0)
+
+        if generated.ndim == 4:
+            if generated.shape[-1] == 1:
+                display_images = generated[..., 0]
+            else:
+                display_images = generated
+        elif generated.ndim == 3:
+            display_images = generated
+        else:
+            flat = generated.reshape(generated.shape[0], -1)
+            side = int(np.sqrt(flat.shape[-1]))
+            if side * side == flat.shape[-1]:
+                display_images = flat.reshape(generated.shape[0], side, side)
+            else:
+                display_images = flat
 
         fig, axes = plt.subplots(grid_size, grid_size, figsize=(grid_size, grid_size))
-        for image, axis in zip(images, axes.flatten()):
+        for image, axis in zip(display_images, axes.flatten()):
             if image.ndim == 2:
                 axis.imshow(image, cmap="gray", vmin=0.0, vmax=1.0)
+            elif image.ndim == 3:
+                axis.imshow(image, vmin=0.0, vmax=1.0)
             else:
                 axis.plot(image)
             axis.axis("off")
@@ -311,7 +373,7 @@ def parse_args() -> argparse.Namespace:
         default=[1e-3],
         help="Learning rates to sweep",
     )
-    parser.add_argument("--steps", type=int, default=50000, help="Training steps per learning rate")
+    parser.add_argument("--steps", type=int, default=1000, help="Training steps per learning rate")
     parser.add_argument("--batch-size", type=int, default=512, help="Mini-batch size")
     parser.add_argument("--seed", type=int, default=0, help="PRNG seed")
     parser.add_argument("--target-norm", type=float, default=1.0, help="Target norm for tangent updates")
@@ -350,18 +412,18 @@ def main() -> None:
     args = parse_args()
 
     dataset = prepare_data()
-    image_dim = dataset.shape[1]
+    image_shape = tuple(dataset.shape[1:])
 
-    generator = build_model(args.latent_dim, image_dim, args.hidden_width)
-    discriminator = build_model(image_dim, 1, args.hidden_width)
+    generator = build_generator(args.latent_dim, image_shape, args.hidden_width)
+    discriminator = build_discriminator(image_shape, args.hidden_width)
 
     base_key = jax.random.PRNGKey(args.seed)
 
     results: Dict[str, List[Dict[str, object]]] = {method: [] for method in args.methods}
     best_runs: Dict[str, Dict[str, object]] = {}
 
-    dual_alpha = 2e-5
-    dual_beta = 0.9
+    dual_alpha = 2e-10
+    dual_beta = 0.5
 
     for method_idx, method in enumerate(args.methods):
         method_key = jax.random.fold_in(base_key, method_idx)
