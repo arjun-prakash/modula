@@ -366,7 +366,7 @@ class Conv2D(Atom):
         self.d_out = d_out
         self.k = kernel_size # add kernel size
         self.smooth = True
-        self.mass = 1 # based on paper, this is hyperparameter, but kept as 1 in consistency w. Linear
+        self.mass = 1 
         self.sensitivity = 1
 
     def forward(self, x, w):
@@ -427,6 +427,50 @@ class Conv2D(Atom):
         vectorized_dualize = jax.vmap(jax.vmap(dualize_at_position, in_axes=0, out_axes=0), in_axes=0, out_axes=0)
         
         return [vectorized_dualize(grad)]
+    
+    def retract(self, w):
+        weight = w[0]  # [k, k, d_in, d_out]
+        
+        # Apply matrix_sign at each spatial position
+        def retract_at_position(w_slice):
+            # w_slice: [d_in, d_out]
+            return matrix_sign(w_slice)
+        
+        # Vectorize over spatial dimensions
+        vectorized = jax.vmap(jax.vmap(retract_at_position))
+        retracted = vectorized(weight)
+        
+        return [retracted]
+    
+    def dual_ascent(self, w, grad_w, target_norm=1.0):
+        weight = w[0]  # [k, k, d_in, d_out]
+        grad = grad_w[0]
+        
+        alpha = 0.01
+        steps = 100
+        tol = 1e-6
+        
+        # Apply dual_ascent at each spatial position independently
+        def dual_at_position(w_slice, g_slice):
+            # w_slice, g_slice: [d_in, d_out]
+            transpose = w_slice.shape[0] < w_slice.shape[1]
+            if transpose:
+                w_slice = w_slice.T
+                g_slice = g_slice.T
+            
+            lambda_init = -0.25 * (w_slice.T @ g_slice + g_slice.T @ w_slice)
+            tangent = _dual_ascent(w_slice, g_slice, lambda_init, 
+                                alpha=alpha, steps=steps, tol=tol)
+            
+            if transpose:
+                tangent = tangent.T
+            return tangent
+        
+        # Vectorize over spatial dimensions
+        vectorized = jax.vmap(jax.vmap(dual_at_position))
+        tangents = vectorized(weight, grad)
+        
+        return [tangents]
 
 if __name__ == "__main__":
 
