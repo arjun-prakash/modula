@@ -407,7 +407,7 @@ class Conv2D(Atom):
         self.d_out = d_out
         self.k = kernel_size # add kernel size
         self.smooth = True
-        self.mass = 1 # based on paper, this is hyperparameter, but kept as 1 in consistency w. Linear
+        self.mass = 1 
         self.sensitivity = 1
         self.retract_enabled = retract_enabled
 
@@ -522,7 +522,6 @@ class Conv2D(Atom):
             )(W, G, Λ, V)
 
         return [tangent], [(Λn, Vn)]
-
 
 
 
