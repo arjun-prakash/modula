@@ -197,7 +197,7 @@ def train_single_run(
             )
             gen_weights = [w - learning_rate * t for w, t in zip(gen_weights, tangents)]
             gen_weights = generator.retract(gen_weights)
-            gem_dual_state = dampen_dual_state(gen_dual_state, factor=0.25, zero_velocity=True)
+            gen_dual_state = dampen_dual_state(gen_dual_state, factor=0.25, zero_velocity=True)
 
         elif method == "dualize":
             directions = generator.dualize(gen_grads, target_norm=target_norm)
