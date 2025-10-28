@@ -11,7 +11,7 @@ from tqdm import trange
 
 from data.mnist import load_mnist
 from modula.abstract import Bond
-from modula.atom import Linear, Conv2D
+from modula.atom import Linear, Conv2D, dampen_dual_state
 from modula.bond import ReLU, Flatten
 
 METHOD_CHOICES = ("manifold", "manifold_online", "dualize", "descent")
@@ -56,9 +56,9 @@ def build_generator(latent_dim: int, image_shape: Tuple[int, int, int], hidden_d
     flatten_dim = height * width * base_channels
 
     generator = Tanh()
-    generator @= Conv2D(base_channels, channels, kernel_size=3)
+    generator @= Conv2D(base_channels, channels, kernel_size=3, retract_enabled=False)
     generator @= ReLU()
-    generator @= Conv2D(base_channels, base_channels, kernel_size=3)
+    generator @= Conv2D(base_channels, base_channels, kernel_size=3, retract_enabled=False)
     generator @= ReLU()
     generator @= Reshape((height, width, base_channels))
     generator @= Linear(flatten_dim, hidden_dim)
@@ -171,6 +171,7 @@ def train_single_run(
             )
             disc_weights = [w - learning_rate * t for w, t in zip(disc_weights, tangents)]
             disc_weights = discriminator.retract(disc_weights)
+            disc_dual_state = dampen_dual_state(disc_dual_state, factor=0.25, zero_velocity=True)
         elif method == "dualize":
             directions = discriminator.dualize(disc_grads, target_norm=target_norm)
             disc_weights = [w - learning_rate * direction for w, direction in zip(disc_weights, directions)]
@@ -196,6 +197,8 @@ def train_single_run(
             )
             gen_weights = [w - learning_rate * t for w, t in zip(gen_weights, tangents)]
             gen_weights = generator.retract(gen_weights)
+            gem_dual_state = dampen_dual_state(gen_dual_state, factor=0.25, zero_velocity=True)
+
         elif method == "dualize":
             directions = generator.dualize(gen_grads, target_norm=target_norm)
             gen_weights = [w - learning_rate * direction for w, direction in zip(gen_weights, directions)]
@@ -422,8 +425,8 @@ def main() -> None:
     results: Dict[str, List[Dict[str, object]]] = {method: [] for method in args.methods}
     best_runs: Dict[str, Dict[str, object]] = {}
 
-    dual_alpha = 2e-10
-    dual_beta = 0.5
+    dual_alpha = 2e-5
+    dual_beta = 0.90
 
     for method_idx, method in enumerate(args.methods):
         method_key = jax.random.fold_in(base_key, method_idx)

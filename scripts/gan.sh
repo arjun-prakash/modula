@@ -12,7 +12,7 @@
 # Load Python module
 
 module load python
-export PYTHONPATH=$(pwd):$PYTHONPATH
-source .venv/bin/activate
+#export PYTHONPATH=$(pwd):$PYTHONPATH
 
-python examples/gan.py
+#uv run examples/gan.py --steps 5000 --learning-rate 5e-3 --method dualize
+uv run examples/gan.py --steps 5000 --learning-rate 5e-2 --method manifold_online --target-norm 5.0

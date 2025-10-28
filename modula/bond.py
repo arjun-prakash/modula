@@ -176,3 +176,31 @@ class HadamardProduct(Bond):
         a, b = x
         return a * b
 
+
+
+class AvgPool2D(Bond):
+    """Average pooling over spatial dimensions.
+    
+    Input shape: [N, H, W, C]
+    Output shape: [N, H//pool_size, W//pool_size, C]
+    """
+    def __init__(self, pool_size=2, strides=None):
+        super().__init__()
+        self.smooth = True  # averaging is a smooth operation
+        self.sensitivity = 1
+        self.pool_size = pool_size
+        self.strides = strides if strides is not None else pool_size
+    
+    def forward(self, x, w):
+        # x shape: [N, H, W, C]
+        # Using reduce_window for average pooling
+        pooled = jax.lax.reduce_window(
+            x,
+            0.0,  # init value for sum
+            jax.lax.add,
+            window_dimensions=(1, self.pool_size, self.pool_size, 1),
+            window_strides=(1, self.strides, self.strides, 1),
+            padding='VALID'
+        )
+        # Divide by pool area to get average
+        return pooled / (self.pool_size * self.pool_size)
