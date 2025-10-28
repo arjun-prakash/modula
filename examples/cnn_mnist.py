@@ -9,8 +9,8 @@ import numpy as np
 from tqdm import trange
 
 from data.mnist import load_mnist
-from modula.atom import Linear, matrix_sign
-from modula.bond import ReLU
+from modula.atom import Linear, matrix_sign, Conv2D
+from modula.bond import ReLU, Flatten
 
 METHOD_CHOICES = ( "manifold_online", "dualize", "descent")
 
@@ -18,8 +18,11 @@ METHOD_CHOICES = ( "manifold_online", "dualize", "descent")
 def prepare_data():
     train_images, train_labels, test_images, test_labels = load_mnist()
 
-    X_train = jnp.asarray(train_images, dtype=jnp.float32).reshape(train_images.shape[0], -1) 
-    X_test = jnp.asarray(test_images, dtype=jnp.float32).reshape(test_images.shape[0], -1) 
+    # X_train = jnp.asarray(train_images, dtype=jnp.float32).reshape(train_images.shape[0], -1) 
+    # X_test = jnp.asarray(test_images, dtype=jnp.float32).reshape(test_images.shape[0], -1) 
+
+    X_train = jnp.asarray(train_images, dtype=jnp.float32)[..., None]
+    X_test = jnp.asarray(test_images, dtype=jnp.float32)[..., None]
 
     y_train_one_hot = jax.nn.one_hot(jnp.asarray(train_labels, dtype=jnp.int32), 10).astype(jnp.float32)
     train_labels_int = jnp.asarray(train_labels, dtype=jnp.int32)
@@ -28,12 +31,30 @@ def prepare_data():
     return X_train, y_train_one_hot, train_labels_int, X_test, test_labels_int
 
 
+# def build_model(input_dim, output_dim, width):
+#     model = Linear(output_dim, width)
+#     model @= ReLU() @ Linear(width, width)
+#     model @= ReLU() @ Linear(width, input_dim)
+#     model.jit()
+#     return model
+
+
 def build_model(input_dim, output_dim, width):
-    model = Linear(output_dim, width)
-    model @= ReLU() @ Linear(width, width)
-    model @= ReLU() @ Linear(width, input_dim)
-    model.jit()
-    return model
+    d_in = 1
+    d_hidden1 = 16
+    d_hidden2 = 32
+    kernel_size = 3
+    output_dim = 10
+    flattened_dim = 28 * 28 * d_hidden2  # 25088
+
+    cnn = Linear(output_dim, flattened_dim)
+    cnn @= Flatten()
+    cnn @= ReLU() @ Conv2D(d_hidden1, d_hidden2, kernel_size)
+    cnn @= ReLU() @ Conv2D(d_in, d_hidden1, kernel_size)
+
+    print(cnn)
+    cnn.jit()
+    return cnn
 
 
 def sample_batch(key, batch_size, inputs, targets):
@@ -49,10 +70,22 @@ def mse_factory(model):
     return loss_fn
 
 
-def compute_accuracy(model, weights, inputs, labels):
-    logits = model(inputs, weights)
-    predictions = jnp.argmax(logits, axis=1)
-    return float(jnp.mean(predictions == labels) * 100.0)
+def compute_accuracy(model, weights, inputs, labels, *, batch_size=1024):
+    num_examples = inputs.shape[0]
+    correct = 0
+
+    for start in range(0, num_examples, batch_size):
+        end = min(start + batch_size, num_examples)
+        batch_inputs = inputs[start:end]
+        batch_labels = labels[start:end]
+
+        logits = model(batch_inputs, weights)
+        predictions = jnp.argmax(logits, axis=1)
+        matches = jnp.sum(predictions == batch_labels)
+
+        correct += int(matches)
+
+    return correct * 100.0 / num_examples
 
 
 def train_single_run(model, base_key, method, learning_rate, steps, batch_size, target_norm, inputs, targets):
@@ -91,7 +124,8 @@ def train_single_run(model, base_key, method, learning_rate, steps, batch_size, 
                     beta=dual_beta,
                 )
             weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
-            weights = [matrix_sign(weight_matrix) for weight_matrix in weights]  # retraction
+            #weights = [matrix_sign(weight_matrix) for weight_matrix in weights]  # retraction
+            weights = model.retract(weights)
 
         elif method == "dualize":
             directions = model.dualize(grad_weights, target_norm=target_norm)
@@ -304,8 +338,12 @@ def main():
                 y_train_one_hot,
             )
 
-            train_accuracy = compute_accuracy(model, weights, X_train, train_labels_int)
-            test_accuracy = compute_accuracy(model, weights, X_test, test_labels_int)
+            train_accuracy = compute_accuracy(
+                model, weights, X_train, train_labels_int, batch_size=1024
+            )
+            test_accuracy = compute_accuracy(
+                model, weights, X_test, test_labels_int, batch_size=1024
+            )
 
             entry = {
                 "learning_rate": learning_rate,
