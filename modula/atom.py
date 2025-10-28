@@ -40,7 +40,7 @@ def matrix_sign(matrix: Array, *, steps: int = 10) -> Array:
 
     norm = jnp.linalg.norm(matrix, ord='fro')
     norm = jnp.where(norm == 0, 1.0, norm)
-    x = (matrix / (norm * 1.01)).astype(jnp.bfloat16)
+    x = (matrix / (norm * 1.01)) #.astype(jnp.bfloat16)
     eye = jnp.eye(x.shape[-2], dtype=x.dtype)
 
     for step in range(steps):
@@ -204,7 +204,7 @@ class Linear(Atom):
 
     def retract(self, w):
         weight = w[0]
-        weight = matrix_sign(weight)
+        weight = matrix_sign(weight) #should this be scaled? * jnp.sqrt(self.fanout / self.fanin)
         return [weight]
 
     def dualize(self, grad_w, target_norm=1.0):
@@ -358,9 +358,50 @@ class Embed(Atom):
         d_weight = jnp.nan_to_num(d_weight)
         return [d_weight]
 
+
+from typing import Any
+def dampen_dual_state(state: Any, *, factor: float = 0.25, zero_velocity: bool = True) -> Any:
+        """
+        Recursively damp the dual state after a retraction.
+
+        - For (Λ, V) tuples (Linear: [ (Λ, V) ], Conv2D: [ (Λ[k,k], V[k,k]) ]):
+            Λ ← factor · Λ
+            V ← 0            if zero_velocity else factor · V
+        - Leaves non-(Λ,V) leaves (e.g., Bias state vectors) unchanged.
+        - Handles arbitrarily nested [list]/(tuple) structures returned by your model.
+        - Safe on None: returns None.
+
+        Args:
+            state: the dual_state structure returned by model.online_dual_ascent(...)
+            factor: multiplicative damping for Λ (e.g., 0.25)
+            zero_velocity: if True, reset V to zeros; otherwise scale V by `factor`.
+
+        Returns:
+            A new dual_state with damping applied.
+        """
+        if state is None:
+            return None
+
+        def _rec(s):
+            # Detect a (Λ, V) pair
+            if isinstance(s, tuple) and len(s) == 2 and all(hasattr(x, "shape") for x in s):
+                lam, vel = s
+                lam = factor * lam
+                vel = jnp.zeros_like(vel) if zero_velocity else factor * vel
+                return (lam, vel)
+
+            # Recurse through lists/tuples of children
+            if isinstance(s, (list, tuple)):
+                return type(s)(_rec(x) for x in s)
+
+            # Anything else (e.g., Bias state tensor) -> leave unchanged
+            return s
+
+        return _rec(state)
+
 class Conv2D(Atom):
     # no stride and padding for simplicity
-    def __init__(self, d_in, d_out, kernel_size):
+    def __init__(self, d_in, d_out, kernel_size, retract_enabled: bool = True):
         super().__init__()
         self.d_in  = d_in
         self.d_out = d_out
@@ -368,6 +409,21 @@ class Conv2D(Atom):
         self.smooth = True
         self.mass = 1 # based on paper, this is hyperparameter, but kept as 1 in consistency w. Linear
         self.sensitivity = 1
+        self.retract_enabled = retract_enabled
+
+    def _scale(self, target_norm: float = 1.0):
+        # same factor you already use, just centralized
+        return jnp.sqrt(self.d_out / self.d_in) / (self.k ** 2) * target_norm
+
+    def _per_slice(self, input, op):
+        """Apply op([d_in, d_out]) at each spatial (k, k) position."""
+        return jax.vmap(
+            jax.vmap(op, in_axes=0, out_axes=0),
+            in_axes=0, out_axes=0
+        )(input)
+
+    
+
 
     def forward(self, x, w):
         # x shape is [N, H, W, C]
@@ -382,51 +438,93 @@ class Conv2D(Atom):
         )
 
     def initialize(self, key):
-        # Create weights directly in [k, k, d_in, d_out] format
-        shape = (self.k, self.k, self.d_in, self.d_out)
+        shape = (self.k, self.k, self.d_in, self.d_out)           # [k, k, d_in, d_out]
         weight = jax.random.normal(key, shape=shape)
-
-        # Orthogonalize over [d_in, d_out] at each [k, k] position
-        # Apply orthogonalize to axis (2, 3) which are [d_in, d_out]
-        def ortho_at_position(w_slice):
-            # w_slice shape: [d_in, d_out]
-            return orthogonalize(w_slice)
-        
-        # Vectorize over the spatial dimensions (axes 0 and 1)
-        vectorized_ortho = jax.vmap(jax.vmap(ortho_at_position, in_axes=0, out_axes=0), in_axes=0, out_axes=0)
-        
-        # Mod. norm p17: scale factor for normalized weights
-        scale_factor = jnp.sqrt(self.d_out / self.d_in) / (self.k**2)
-        
-        weight = vectorized_ortho(weight) * scale_factor
-
-        return [weight]
+        weight = self._per_slice(weight, matrix_sign)                    # per-slice UV^T
+        return [self._scale() * weight]
 
     def project(self, w):
-        weight = w[0]  # shape is [k, k, d_in, d_out]
-        
-        # Define a function to apply at each spatial position
-        def project_at_position(w_slice):
-            # w_slice shape: [d_in, d_out]
-            return orthogonalize(w_slice) * jnp.sqrt(self.d_out / self.d_in) / (self.k**2)
-        
-        # Vectorize over spatial dimensions
-        vectorized_project = jax.vmap(jax.vmap(project_at_position, in_axes=0, out_axes=0), in_axes=0, out_axes=0)
-        
-        return [vectorized_project(weight)]
+        weight = w[0]                                              # [k, k, d_in, d_out]
+        weight = self._per_slice(weight, matrix_sign)
+        return [self._scale() * weight]
 
+    # --- dualize: per-slice msign(grad) + fixed scale (times target_norm) ---
     def dualize(self, grad_w, target_norm=1.0):
-        grad = grad_w[0]  # shape is [k, k, d_in, d_out]
-        
-        # Define a function to apply at each spatial position
-        def dualize_at_position(g_slice):
-            # g_slice shape: [d_in, d_out]
-            return orthogonalize(g_slice) * jnp.sqrt(self.d_out / self.d_in) / (self.k**2) * target_norm
+        grad = grad_w[0]                                           # [k, k, d_in, d_out]
+        out = self._per_slice(grad, matrix_sign)
+        return [self._scale(target_norm) * out]
 
-        # Vectorize over spatial dimensions
-        vectorized_dualize = jax.vmap(jax.vmap(dualize_at_position, in_axes=0, out_axes=0), in_axes=0, out_axes=0)
-        
-        return [vectorized_dualize(grad)]
+    def retract(self, w):
+        if not self.retract_enabled:
+            return w  # no-op
+
+        W = w[0]  # [k,k,d_in,d_out]
+        if self.d_in >= self.d_out:
+            W_ret = self._per_slice(W, matrix_sign)
+        else:
+            WT = jnp.swapaxes(W, -2, -1)
+            WT = self._per_slice(WT, matrix_sign)
+            W_ret = jnp.swapaxes(WT, -2, -1)
+        # if you also carry a gain parameter (W, g), keep g unchanged
+        return [W_ret] if len(w) == 1 else [W_ret, *w[1:]]
+
+
+    def init_dual_state(self, w):
+    # Λ lives in the smaller side’s space so the matmul contracts correctly
+        d_hat = self.d_out if self.d_in >= self.d_out else self.d_in
+        dtype = w[0].dtype if w else jnp.float32
+        lam0 = jnp.zeros((self.k, self.k, d_hat, d_hat), dtype=dtype)
+        vel0 = jnp.zeros_like(lam0)
+        return [(lam0, vel0)]
+
+
+
+    def online_dual_ascent(
+        self, state, w, grad_w, *, target_norm: float = 1.0, alpha: float = 1e-2, beta: float = 0.9
+    ):
+        W = w[0]      # [k, k, d_in, d_out]
+        G = grad_w[0] # [k, k, d_in, d_out]
+        if not state:
+            Λ, V = self.init_dual_state(w)[0]
+        else:
+            Λ, V = state[0]
+
+        alpha = jnp.asarray(alpha, dtype=W.dtype)
+        beta  = jnp.asarray(beta,  dtype=W.dtype)
+        target_scale = jnp.asarray(self._scale(target_norm), dtype=W.dtype)
+
+        if self.d_in >= self.d_out:
+            # TALL: column-Stiefel, right-Λ (matches _online_dual_ascent_step as-is)
+            def per_slice(Ws, Gs, Ls, Vs):
+                T, Ln, Vn = _online_dual_ascent_step(
+                    Ws, Gs, Ls, Vs, target_norm=target_scale, alpha=alpha, beta=beta
+                )
+                return T, Ln, Vn
+            tangent, Λn, Vn = jax.vmap(
+                jax.vmap(per_slice, in_axes=(0,0,0,0), out_axes=(0,0,0)),
+                in_axes=(0,0,0,0), out_axes=(0,0,0)
+            )(W, G, Λ, V)
+
+        else:
+            # WIDE: row-Stiefel, left-Λ
+            # reuse the same step by transposing slices and computing in the "tall" orientation
+            def per_slice(Ws, Gs, Ls, Vs):
+                WsT = jnp.swapaxes(Ws, -2, -1)  # [d_out, d_in]
+                GsT = jnp.swapaxes(Gs, -2, -1)
+                Tt, Ln, Vn = _online_dual_ascent_step(
+                    WsT, GsT, Ls, Vs, target_norm=target_scale, alpha=alpha, beta=beta
+                )
+                T  = jnp.swapaxes(Tt, -2, -1)   # back to [d_in, d_out]
+                return T, Ln, Vn
+            tangent, Λn, Vn = jax.vmap(
+                jax.vmap(per_slice, in_axes=(0,0,0,0), out_axes=(0,0,0)),
+                in_axes=(0,0,0,0), out_axes=(0,0,0)
+            )(W, G, Λ, V)
+
+        return [tangent], [(Λn, Vn)]
+
+
+
 
 if __name__ == "__main__":
 
