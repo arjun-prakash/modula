@@ -177,6 +177,31 @@ class HadamardProduct(Bond):
         return a * b
 
 
+class MaxPool2D(Bond):
+    """Max pooling over spatial dimensions.
+    
+    Input shape: [N, H, W, C]
+    Output shape: [N, H//pool_size, W//pool_size, C]
+    """
+    def __init__(self, pool_size=2, strides=None):
+        super().__init__()
+        self.smooth = False  # max operation is not smooth
+        self.sensitivity = 1
+        self.pool_size = pool_size
+        self.strides = strides if strides is not None else pool_size
+    
+    def forward(self, x, w):
+        # x shape: [N, H, W, C]
+        # Using reduce_window for max pooling
+        return jax.lax.reduce_window(
+            x,
+            -jnp.inf,  # init value for max
+            jax.lax.max,
+            window_dimensions=(1, self.pool_size, self.pool_size, 1),
+            window_strides=(1, self.strides, self.strides, 1),
+            padding='VALID'
+        )
+
 
 class AvgPool2D(Bond):
     """Average pooling over spatial dimensions.
@@ -204,3 +229,4 @@ class AvgPool2D(Bond):
         )
         # Divide by pool area to get average
         return pooled / (self.pool_size * self.pool_size)
+

@@ -7,6 +7,7 @@ from typing import Dict, List, Sequence, Tuple
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import numpy as np
 from tqdm import trange
 
 from data.cifar10 import load_cifar10
@@ -26,21 +27,28 @@ METHOD_CHOICES = tuple(sorted(METHOD_ALIASES.keys()))
 @dataclass
 class TaskData:
     class_pair: Tuple[int, int]
-    train_inputs: jnp.ndarray
+    train_inputs: jnp.ndarray  # Can be np.ndarray or jnp.ndarray depending on --use-numpy flag
     train_targets: jnp.ndarray
     train_binary_labels: jnp.ndarray
     test_inputs: jnp.ndarray
     test_binary_labels: jnp.ndarray
 
 
-def prepare_data():
+def prepare_data(use_numpy=False):
     train_images, train_labels, test_images, test_labels = load_cifar10()
 
-    X_train = jnp.asarray(train_images, dtype=jnp.float32).reshape(train_images.shape[0], -1)
-    X_test = jnp.asarray(test_images, dtype=jnp.float32).reshape(test_images.shape[0], -1)
-
-    train_labels_int = jnp.asarray(train_labels, dtype=jnp.int32)
-    test_labels_int = jnp.asarray(test_labels, dtype=jnp.int32)
+    if use_numpy:
+        # Keep as numpy (CPU) to reduce GPU memory usage
+        X_train = np.asarray(train_images, dtype=np.float32).reshape(train_images.shape[0], -1)
+        X_test = np.asarray(test_images, dtype=np.float32).reshape(test_images.shape[0], -1)
+        train_labels_int = np.asarray(train_labels, dtype=np.int32)
+        test_labels_int = np.asarray(test_labels, dtype=np.int32)
+    else:
+        # Load to GPU with jnp
+        X_train = jnp.asarray(train_images, dtype=jnp.float32).reshape(train_images.shape[0], -1)
+        X_test = jnp.asarray(test_images, dtype=jnp.float32).reshape(test_images.shape[0], -1)
+        train_labels_int = jnp.asarray(train_labels, dtype=jnp.int32)
+        test_labels_int = jnp.asarray(test_labels, dtype=jnp.int32)
 
     return X_train, train_labels_int, X_test, test_labels_int
 
@@ -57,9 +65,18 @@ def build_model(input_dim, hidden_width):
 def sample_batch(key, batch_size, inputs, targets):
     if inputs.shape[0] == 0:
         raise ValueError("Cannot sample from an empty dataset")
-    replace = inputs.shape[0] < batch_size
-    idx = jax.random.choice(key, inputs.shape[0], shape=(batch_size,), replace=replace)
-    return inputs[idx], targets[idx]
+    
+    # Sample on CPU with numpy, then transfer to GPU
+    if isinstance(inputs, np.ndarray):
+        replace = inputs.shape[0] < batch_size
+        idx = np.random.choice(inputs.shape[0], size=batch_size, replace=replace)
+        # Only convert batch to jnp (moves to GPU)
+        return jnp.asarray(inputs[idx]), jnp.asarray(targets[idx])
+    else:
+        # Already on GPU
+        replace = inputs.shape[0] < batch_size
+        idx = jax.random.choice(key, inputs.shape[0], shape=(batch_size,), replace=replace)
+        return inputs[idx], targets[idx]
 
 
 def mse_factory(model):
@@ -71,6 +88,11 @@ def mse_factory(model):
 
 
 def compute_binary_accuracy(model, weights, inputs, binary_labels):
+    # Convert to jnp if numpy
+    if isinstance(inputs, np.ndarray):
+        inputs = jnp.asarray(inputs)
+        binary_labels = jnp.asarray(binary_labels)
+    
     logits = model(inputs, weights)
     predictions = jnp.argmax(logits, axis=1)
     return float(jnp.mean(predictions == binary_labels) * 100.0)
@@ -89,28 +111,48 @@ def sample_task_class_pairs(key, num_tasks, num_classes=10):
 
 
 def build_binary_task_datasets(
-    X_train: jnp.ndarray,
-    train_labels: jnp.ndarray,
-    X_test: jnp.ndarray,
-    test_labels: jnp.ndarray,
+    X_train,  # Can be np.ndarray or jnp.ndarray
+    train_labels,
+    X_test,
+    test_labels,
     class_pairs: Sequence[Tuple[int, int]],
+    use_numpy: bool = False,
 ) -> List[TaskData]:
     datasets: List[TaskData] = []
-    for class_pair in class_pairs:
+    for idx, class_pair in enumerate(class_pairs):
         a, b = class_pair
-        train_mask = jnp.logical_or(train_labels == a, train_labels == b)
-        test_mask = jnp.logical_or(test_labels == a, test_labels == b)
+        
+        if use_numpy:
+            # All masking on CPU with numpy
+            train_mask = (train_labels == a) | (train_labels == b)
+            test_mask = (test_labels == a) | (test_labels == b)
 
-        train_inputs = X_train[train_mask]
-        test_inputs = X_test[test_mask]
+            train_inputs = X_train[train_mask]
+            test_inputs = X_test[test_mask]
 
-        train_selected_labels = train_labels[train_mask]
-        test_selected_labels = test_labels[test_mask]
+            train_selected_labels = train_labels[train_mask]
+            test_selected_labels = test_labels[test_mask]
 
-        train_binary = jnp.where(train_selected_labels == a, 0, 1).astype(jnp.int32)
-        test_binary = jnp.where(test_selected_labels == a, 0, 1).astype(jnp.int32)
+            train_binary = np.where(train_selected_labels == a, 0, 1).astype(np.int32)
+            test_binary = np.where(test_selected_labels == a, 0, 1).astype(np.int32)
 
-        train_targets = jax.nn.one_hot(train_binary, 2).astype(jnp.float32)
+            # One-hot on CPU
+            train_targets = np.eye(2, dtype=np.float32)[train_binary]
+        else:
+            # All operations on GPU with jnp
+            train_mask = jnp.logical_or(train_labels == a, train_labels == b)
+            test_mask = jnp.logical_or(test_labels == a, test_labels == b)
+
+            train_inputs = X_train[train_mask]
+            test_inputs = X_test[test_mask]
+
+            train_selected_labels = train_labels[train_mask]
+            test_selected_labels = test_labels[test_mask]
+
+            train_binary = jnp.where(train_selected_labels == a, 0, 1).astype(jnp.int32)
+            test_binary = jnp.where(test_selected_labels == a, 0, 1).astype(jnp.int32)
+
+            train_targets = jax.nn.one_hot(train_binary, 2).astype(jnp.float32)
 
         datasets.append(
             TaskData(
@@ -122,6 +164,7 @@ def build_binary_task_datasets(
                 test_binary_labels=test_binary,
             )
         )
+    
     return datasets
 
 
@@ -299,6 +342,11 @@ def parse_args():
         default=Path("plots") / "continual_cifar",
         help="Directory to save accuracy plots",
     )
+    parser.add_argument(
+        "--use-numpy",
+        action="store_true",
+        help="Keep datasets on CPU as numpy arrays (reduces GPU memory usage)",
+    )
     return parser.parse_args()
 
 
@@ -318,7 +366,7 @@ def main():
     args = parse_args()
     args.methods = canonicalize_methods(args.methods)
 
-    X_train, train_labels, X_test, test_labels = prepare_data()
+    X_train, train_labels, X_test, test_labels = prepare_data(use_numpy=args.use_numpy)
 
     input_dim = X_train.shape[1]
     model = build_model(input_dim, args.hidden_width)
@@ -327,7 +375,7 @@ def main():
     pair_key = jax.random.PRNGKey(pair_seed)
     class_pairs = sample_task_class_pairs(pair_key, args.num_tasks)
 
-    task_datasets = build_binary_task_datasets(X_train, train_labels, X_test, test_labels, class_pairs)
+    task_datasets = build_binary_task_datasets(X_train, train_labels, X_test, test_labels, class_pairs, use_numpy=args.use_numpy)
 
     results: Dict[str, List[Dict[str, float]]] = {}
 
