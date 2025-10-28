@@ -12,7 +12,7 @@ from tqdm import trange
 from data.mnist import load_mnist
 from modula.abstract import Bond
 from modula.atom import Linear, Conv2D, dampen_dual_state
-from modula.bond import ReLU, Flatten
+from modula.bond import ReLU, Flatten, MaxPool2D
 
 METHOD_CHOICES = ("manifold", "manifold_online", "dualize", "descent")
 
@@ -53,14 +53,20 @@ def prepare_data() -> jnp.ndarray:
 def build_generator(latent_dim: int, image_shape: Tuple[int, int, int], hidden_dim: int, conv_channels: int = 32):
     height, width, channels = image_shape
     base_channels = conv_channels
-    flatten_dim = height * width * base_channels
+    upscale_factor = 2
+    expanded_height = height * upscale_factor
+    expanded_width = width * upscale_factor
+    flatten_dim = expanded_height * expanded_width * base_channels
 
     generator = Tanh()
     generator @= Conv2D(base_channels, channels, kernel_size=3, retract_enabled=False)
     generator @= ReLU()
+    generator @= MaxPool2D(pool_size=upscale_factor)
     generator @= Conv2D(base_channels, base_channels, kernel_size=3, retract_enabled=False)
     generator @= ReLU()
-    generator @= Reshape((height, width, base_channels))
+    generator @= Conv2D(base_channels, base_channels, kernel_size=3, retract_enabled=False)
+    generator @= ReLU()
+    generator @= Reshape((expanded_height, expanded_width, base_channels))
     generator @= Linear(flatten_dim, hidden_dim)
     generator @= ReLU()
     generator @= Linear(hidden_dim, latent_dim)
@@ -72,14 +78,25 @@ def build_discriminator(image_shape: Tuple[int, int, int], hidden_dim: int, conv
     height, width, channels = image_shape
     conv1_channels = conv_channels
     conv2_channels = max(conv_channels * 2, conv_channels)
-    flatten_dim = height * width * conv2_channels
+    pool_size = 2
+
+    def pooled_dim(size: int) -> int:
+        return ((size - pool_size) // pool_size) + 1
+
+    height_after_pool1 = pooled_dim(height)
+    width_after_pool1 = pooled_dim(width)
+    height_after_pool2 = pooled_dim(height_after_pool1)
+    width_after_pool2 = pooled_dim(width_after_pool1)
+    flatten_dim = height_after_pool2 * width_after_pool2 * conv2_channels
 
     discriminator = Linear(1, hidden_dim)
     discriminator @= ReLU()
     discriminator @= Linear(hidden_dim, flatten_dim)
     discriminator @= Flatten()
+    discriminator @= MaxPool2D(pool_size=pool_size)
     discriminator @= ReLU()
     discriminator @= Conv2D(conv1_channels, conv2_channels, kernel_size=3)
+    discriminator @= MaxPool2D(pool_size=pool_size)
     discriminator @= ReLU()
     discriminator @= Conv2D(channels, conv1_channels, kernel_size=3)
     discriminator.jit()
@@ -187,17 +204,19 @@ def train_single_run(
             gen_weights = [w - learning_rate * t for w, t in zip(gen_weights, tangents)]
             gen_weights = generator.retract(gen_weights)
         elif method == "manifold_online":
-            tangents, gen_dual_state = generator.online_dual_ascent(
-                gen_dual_state,
-                gen_weights,
-                gen_grads,
-                target_norm=target_norm,
-                alpha=dual_alpha,
-                beta=dual_beta,
-            )
-            gen_weights = [w - learning_rate * t for w, t in zip(gen_weights, tangents)]
-            gen_weights = generator.retract(gen_weights)
-            gen_dual_state = dampen_dual_state(gen_dual_state, factor=0.25, zero_velocity=True)
+            # tangents, gen_dual_state = generator.online_dual_ascent(
+            #     gen_dual_state,
+            #     gen_weights,
+            #     gen_grads,
+            #     target_norm=target_norm,
+            #     alpha=dual_alpha,
+            #     beta=dual_beta,
+            # )
+            # gen_weights = [w - learning_rate * t for w, t in zip(gen_weights, tangents)]
+            # gen_weights = generator.retract(gen_weights)
+            # gen_dual_state = dampen_dual_state(gen_dual_state, factor=0.25, zero_velocity=True)
+            directions = generator.dualize(gen_grads, target_norm=target_norm)
+            gen_weights = [w - learning_rate * direction for w, direction in zip(gen_weights, directions)]
 
         elif method == "dualize":
             directions = generator.dualize(gen_grads, target_norm=target_norm)
