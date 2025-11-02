@@ -142,7 +142,12 @@ def train_single_run(model, base_key, method, learning_rate, steps, batch_size, 
 def singular_values_per_layer(weights):
     values = []
     for layer_weights in weights:
-        singular_vals = jnp.linalg.svd(layer_weights, compute_uv=False)
+        if layer_weights.ndim == 4:
+            k_h, k_w, d_in, d_out = layer_weights.shape
+            matrix = layer_weights.reshape(k_h * k_w * d_in, d_out)
+        else:
+            matrix = layer_weights
+        singular_vals = jnp.linalg.svd(matrix, compute_uv=False)
         values.append(np.asarray(singular_vals))
     return values
 

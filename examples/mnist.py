@@ -12,7 +12,7 @@ from data.mnist import load_mnist
 from modula.atom import Linear, matrix_sign
 from modula.bond import ReLU
 
-METHOD_CHOICES = ( "manifold_online", "dualize", "descent")
+METHOD_CHOICES = ("manifold", "manifold_admm", "manifold_online", "dualize", "descent")
 
 
 def prepare_data():
@@ -92,6 +92,11 @@ def train_single_run(model, base_key, method, learning_rate, steps, batch_size, 
                 )
             weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
             weights = [matrix_sign(weight_matrix) for weight_matrix in weights]  # retraction
+
+        elif method == "manifold_admm":
+            tangents = model.admm_dual_ascent(weights, grad_weights, target_norm=target_norm)
+            weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
+            weights = [matrix_sign(weight_matrix) for weight_matrix in weights]
 
         elif method == "dualize":
             directions = model.dualize(grad_weights, target_norm=target_norm)
@@ -241,7 +246,7 @@ def parse_args():
         "--learning-rates",
         type=float,
         nargs="+",
-        default=[1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8],
+        default=[1e-1, 1e-2, 1e-3],
         help="Learning rates to sweep",
     )
     parser.add_argument("--steps", type=int, default=1000, help="Training steps per learning rate")

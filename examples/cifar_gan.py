@@ -9,12 +9,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import trange
 
-from data.mnist import load_mnist
+from data.cifar100 import load_cifar100
 from modula.abstract import Bond
 from modula.atom import Linear, Conv2D, dampen_dual_state
 from modula.bond import ReLU, Flatten, MaxPool2D
 
 METHOD_CHOICES = ("manifold", "manifold_online", "dualize", "descent")
+
+
+def format_method_label(generator_method: str, discriminator_method: str) -> str:
+    if generator_method == discriminator_method:
+        return generator_method
+    return f"G:{generator_method}|D:{discriminator_method}"
 
 
 class Reshape(Bond):
@@ -44,13 +50,18 @@ class Tanh(Bond):
 
 
 def prepare_data() -> jnp.ndarray:
-    train_images, _, _, _ = load_mnist(normalize=True)
-    images = jnp.asarray(train_images, dtype=jnp.float32)[..., None]
+    train_images, _, _, _ = load_cifar100(normalize=True)
+    images = jnp.asarray(train_images, dtype=jnp.float32)
     images = images * 2.0 - 1.0  # scale to [-1, 1]
     return images
 
 
-def build_generator(latent_dim: int, image_shape: Tuple[int, int, int], hidden_dim: int, conv_channels: int = 32):
+def build_generator(
+    latent_dim: int,
+    image_shape: Tuple[int, int, int],
+    hidden_dim: int,
+    conv_channels: int = 64,
+):
     height, width, channels = image_shape
     base_channels = conv_channels
     upscale_factor = 2
@@ -74,7 +85,11 @@ def build_generator(latent_dim: int, image_shape: Tuple[int, int, int], hidden_d
     return generator
 
 
-def build_discriminator(image_shape: Tuple[int, int, int], hidden_dim: int, conv_channels: int = 32):
+def build_discriminator(
+    image_shape: Tuple[int, int, int],
+    hidden_dim: int,
+    conv_channels: int = 64,
+):
     height, width, channels = image_shape
     conv1_channels = conv_channels
     conv2_channels = max(conv_channels * 2, conv_channels)
@@ -137,7 +152,8 @@ def train_single_run(
     generator,
     discriminator,
     base_key: jax.Array,
-    method: str,
+    generator_method: str,
+    discriminator_method: str,
     learning_rate: float,
     steps: int,
     batch_size: int,
@@ -151,8 +167,8 @@ def train_single_run(
     gen_weights = generator.initialize(key_gen_init)
     disc_weights = discriminator.initialize(key_disc_init)
 
-    gen_dual_state = generator.init_dual_state(gen_weights) if method == "manifold_online" else None
-    disc_dual_state = discriminator.init_dual_state(disc_weights) if method == "manifold_online" else None
+    gen_dual_state = generator.init_dual_state(gen_weights) if generator_method == "manifold_online" else None
+    disc_dual_state = discriminator.init_dual_state(disc_weights) if discriminator_method == "manifold_online" else None
 
     disc_loss_fn = make_discriminator_loss(discriminator, generator)
     gen_loss_fn = make_generator_loss(discriminator, generator)
@@ -164,7 +180,7 @@ def train_single_run(
     disc_loss_value = 0.0
     gen_loss_value = 0.0
 
-    description = f"{method} lr={learning_rate:.3g}"
+    description = f"G:{generator_method} D:{discriminator_method} lr={learning_rate:.3g}"
     for _ in trange(steps, leave=False, desc=description):
         key_loop, key_real, key_noise_d, key_noise_g = jax.random.split(key_loop, 4)
         real_batch = sample_real_batch(key_real, batch_size, dataset)
@@ -173,11 +189,11 @@ def train_single_run(
 
         disc_loss_value, disc_grads = disc_loss_and_grad(disc_weights, gen_weights, real_batch, noise_for_disc)
 
-        if method == "manifold":
+        if discriminator_method == "manifold":
             tangents = discriminator.dual_ascent(disc_weights, disc_grads, target_norm=target_norm)
             disc_weights = [w - learning_rate * t for w, t in zip(disc_weights, tangents)]
             disc_weights = discriminator.retract(disc_weights)
-        elif method == "manifold_online":
+        elif discriminator_method == "manifold_online":
             tangents, disc_dual_state = discriminator.online_dual_ascent(
                 disc_dual_state,
                 disc_weights,
@@ -189,42 +205,39 @@ def train_single_run(
             disc_weights = [w - learning_rate * t for w, t in zip(disc_weights, tangents)]
             disc_weights = discriminator.retract(disc_weights)
             disc_dual_state = dampen_dual_state(disc_dual_state, factor=0.25, zero_velocity=True)
-        elif method == "dualize":
+        elif discriminator_method == "dualize":
             directions = discriminator.dualize(disc_grads, target_norm=target_norm)
             disc_weights = [w - learning_rate * direction for w, direction in zip(disc_weights, directions)]
-        elif method == "descent":
+        elif discriminator_method == "descent":
             disc_weights = [w - learning_rate * grad for w, grad in zip(disc_weights, disc_grads)]
         else:
-            raise ValueError(f"Unknown training method: {method}")
+            raise ValueError(f"Unknown discriminator method: {discriminator_method}")
 
         gen_loss_value, gen_grads = gen_loss_and_grad(gen_weights, disc_weights, noise_for_gen)
 
-        if method == "manifold":
+        if generator_method == "manifold":
             tangents = generator.dual_ascent(gen_weights, gen_grads, target_norm=target_norm)
             gen_weights = [w - learning_rate * t for w, t in zip(gen_weights, tangents)]
             gen_weights = generator.retract(gen_weights)
-        elif method == "manifold_online":
-            # tangents, gen_dual_state = generator.online_dual_ascent(
-            #     gen_dual_state,
-            #     gen_weights,
-            #     gen_grads,
-            #     target_norm=target_norm,
-            #     alpha=dual_alpha,
-            #     beta=dual_beta,
-            # )
-            # gen_weights = [w - learning_rate * t for w, t in zip(gen_weights, tangents)]
-            # gen_weights = generator.retract(gen_weights)
-            # gen_dual_state = dampen_dual_state(gen_dual_state, factor=0.25, zero_velocity=True)
+        elif generator_method == "manifold_online":
+            tangents, gen_dual_state = generator.online_dual_ascent(
+                gen_dual_state,
+                gen_weights,
+                gen_grads,
+                target_norm=target_norm,
+                alpha=dual_alpha,
+                beta=dual_beta,
+            )
+            gen_weights = [w - learning_rate * t for w, t in zip(gen_weights, tangents)]
+            gen_weights = generator.retract(gen_weights)
+            gen_dual_state = dampen_dual_state(gen_dual_state, factor=0.25, zero_velocity=True)
+        elif generator_method == "dualize":
             directions = generator.dualize(gen_grads, target_norm=target_norm)
             gen_weights = [w - learning_rate * direction for w, direction in zip(gen_weights, directions)]
-
-        elif method == "dualize":
-            directions = generator.dualize(gen_grads, target_norm=target_norm)
-            gen_weights = [w - learning_rate * direction for w, direction in zip(gen_weights, directions)]
-        elif method == "descent":
+        elif generator_method == "descent":
             gen_weights = [w - learning_rate * grad for w, grad in zip(gen_weights, gen_grads)]
         else:
-            raise ValueError(f"Unknown training method: {method}")
+            raise ValueError(f"Unknown generator method: {generator_method}")
 
         discriminator_losses.append(float(disc_loss_value))
         generator_losses.append(float(gen_loss_value))
@@ -276,7 +289,7 @@ def plot_losses(best_runs: Dict[str, Dict[str, object]], plots_dir: Path) -> Non
     ax_gen.legend()
     ax_disc.legend()
     fig.tight_layout()
-    fig.savefig(plots_dir / "gan_loss_curves.png", dpi=300)
+    fig.savefig(plots_dir / "cifar100_gan_loss_curves.png", dpi=300)
     plt.close(fig)
 
 
@@ -327,7 +340,7 @@ def save_samples(
             axis.axis("off")
 
         fig.tight_layout()
-        output_path = plots_dir / f"gan_samples_{method}.png"
+        output_path = plots_dir / f"cifar100_gan_samples_{method}.png"
         fig.savefig(output_path, dpi=300)
         plt.close(fig)
         sample_records.append((method, output_path))
@@ -353,6 +366,8 @@ def save_results(
             "hidden_width": int(args.hidden_width),
             "latent_dim": int(args.latent_dim),
             "methods": list(args.methods),
+            "generator_methods": list(args.generator_methods) if args.generator_methods is not None else None,
+            "discriminator_methods": list(args.discriminator_methods) if args.discriminator_methods is not None else None,
         },
         "methods": {},
     }
@@ -368,6 +383,8 @@ def save_results(
                     "mean_fake_score": float(entry["mean_fake_score"]),
                     "generator_losses": [float(val) for val in entry["generator_losses"]],
                     "discriminator_losses": [float(val) for val in entry["discriminator_losses"]],
+                    "generator_method": entry["generator_method"],
+                    "discriminator_method": entry["discriminator_method"],
                 }
                 for entry in runs
             ]
@@ -380,6 +397,8 @@ def save_results(
                 "final_discriminator_loss": float(best["final_discriminator_loss"]),
                 "mean_real_score": float(best["mean_real_score"]),
                 "mean_fake_score": float(best["mean_fake_score"]),
+                "generator_method": best["generator_method"],
+                "discriminator_method": best["discriminator_method"],
             }
 
     with output_path.open("w") as fp:
@@ -387,7 +406,7 @@ def save_results(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="MNIST GAN experiment with manifold optimization")
+    parser = argparse.ArgumentParser(description="CIFAR-100 GAN experiment with manifold optimization")
     parser.add_argument(
         "--learning-rates",
         type=float,
@@ -396,11 +415,11 @@ def parse_args() -> argparse.Namespace:
         help="Learning rates to sweep",
     )
     parser.add_argument("--steps", type=int, default=1000, help="Training steps per learning rate")
-    parser.add_argument("--batch-size", type=int, default=512, help="Mini-batch size")
+    parser.add_argument("--batch-size", type=int, default=256, help="Mini-batch size")
     parser.add_argument("--seed", type=int, default=0, help="PRNG seed")
     parser.add_argument("--target-norm", type=float, default=1.0, help="Target norm for tangent updates")
-    parser.add_argument("--hidden-width", type=int, default=256, help="Hidden layer width")
-    parser.add_argument("--latent-dim", type=int, default=64, help="Latent dimension for generator input")
+    parser.add_argument("--hidden-width", type=int, default=512, help="Hidden layer width")
+    parser.add_argument("--latent-dim", type=int, default=128, help="Latent dimension for generator input")
     parser.add_argument(
         "--methods",
         type=str,
@@ -410,15 +429,29 @@ def parse_args() -> argparse.Namespace:
         help="Training methods to compare",
     )
     parser.add_argument(
+        "--generator-methods",
+        type=str,
+        nargs="+",
+        choices=METHOD_CHOICES,
+        help="Generator training methods to compare (defaults to --methods when unset)",
+    )
+    parser.add_argument(
+        "--discriminator-methods",
+        type=str,
+        nargs="+",
+        choices=METHOD_CHOICES,
+        help="Discriminator training methods to compare (defaults to --methods when unset)",
+    )
+    parser.add_argument(
         "--results-path",
         type=Path,
-        default=Path("results/gan_manifold_results.json"),
+        default=Path("results/cifar100_gan_manifold_results.json"),
         help="Path to save sweep metrics",
     )
     parser.add_argument(
         "--plots-dir",
         type=Path,
-        default=Path("plots"),
+        default=Path("plots/cifar100"),
         help="Directory for plot outputs",
     )
     parser.add_argument(
@@ -441,14 +474,26 @@ def main() -> None:
 
     base_key = jax.random.PRNGKey(args.seed)
 
-    results: Dict[str, List[Dict[str, object]]] = {method: [] for method in args.methods}
-    best_runs: Dict[str, Dict[str, object]] = {}
-
     dual_alpha = 2e-5
     dual_beta = 0.90
 
-    for method_idx, method in enumerate(args.methods):
-        method_key = jax.random.fold_in(base_key, method_idx)
+    if args.generator_methods is None and args.discriminator_methods is None:
+        method_pairs = [(method, method) for method in args.methods]
+    else:
+        generator_methods = args.generator_methods or args.methods
+        discriminator_methods = args.discriminator_methods or args.methods
+        method_pairs = []
+        for gen_method in generator_methods:
+            for disc_method in discriminator_methods:
+                method_pairs.append((gen_method, disc_method))
+
+    method_labels = [format_method_label(gen_method, disc_method) for gen_method, disc_method in method_pairs]
+    results: Dict[str, List[Dict[str, object]]] = {label: [] for label in method_labels}
+    best_runs: Dict[str, Dict[str, object]] = {}
+
+    for pair_idx, (generator_method, discriminator_method) in enumerate(method_pairs):
+        label = format_method_label(generator_method, discriminator_method)
+        method_key = jax.random.fold_in(base_key, pair_idx)
 
         for lr_idx, learning_rate in enumerate(args.learning_rates):
             run_key = jax.random.fold_in(method_key, lr_idx)
@@ -456,7 +501,8 @@ def main() -> None:
                 generator,
                 discriminator,
                 run_key,
-                method,
+                generator_method,
+                discriminator_method,
                 learning_rate,
                 args.steps,
                 args.batch_size,
@@ -475,12 +521,14 @@ def main() -> None:
                 "mean_fake_score": run["mean_fake_score"],
                 "generator_losses": run["generator_losses"],
                 "discriminator_losses": run["discriminator_losses"],
+                "generator_method": generator_method,
+                "discriminator_method": discriminator_method,
             }
-            results[method].append(entry)
+            results[label].append(entry)
 
-            best = best_runs.get(method)
+            best = best_runs.get(label)
             if best is None or run["final_generator_loss"] < best["final_generator_loss"]:
-                best_runs[method] = {
+                best_runs[label] = {
                     "learning_rate": learning_rate,
                     "final_generator_loss": run["final_generator_loss"],
                     "final_discriminator_loss": run["final_discriminator_loss"],
@@ -490,10 +538,13 @@ def main() -> None:
                     "discriminator_losses": run["discriminator_losses"],
                     "generator_weights": run["generator_weights"],
                     "discriminator_weights": run["discriminator_weights"],
+                    "generator_method": generator_method,
+                    "discriminator_method": discriminator_method,
                 }
 
             print(
-                f"[{method}] lr={learning_rate:.3g}: G loss={run['final_generator_loss']:.4f} | "
+                f"[G:{generator_method} | D:{discriminator_method}] lr={learning_rate:.3g}: "
+                f"G loss={run['final_generator_loss']:.4f} | "
                 f"D loss={run['final_discriminator_loss']:.4f} | "
                 f"real={run['mean_real_score']:.3f} fake={run['mean_fake_score']:.3f}"
             )
