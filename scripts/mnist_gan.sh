@@ -12,7 +12,7 @@
 # Load Python module
 
 module load python
-# export PYTHONPATH=$(pwd):$PYTHONPATH
-# source .venv/bin/activate
+#export PYTHONPATH=$(pwd):$PYTHONPATH
 
-uv run examples/cifar10.py --steps 10000 --target-norm 1.0
+#uv run examples/gan.py --steps 5000 --learning-rate 5e-3 --method dualize
+uv run examples/mnist_gan.py --steps 5000 --learning-rate 5e-2 --discriminator-method manifold_online --generator-method dualize 

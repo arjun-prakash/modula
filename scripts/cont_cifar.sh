@@ -15,4 +15,5 @@ module load python
 # export PYTHONPATH=$(pwd):$PYTHONPATH
 # source .venv/bin/activate
 
-uv run examples/cifar10.py --steps 10000 --target-norm 1.0
+#python examples/continual_cifar100.py --num-tasks 100
+uv run examples/continual_cifar100.py --num-tasks 5000 --hidden-width 32

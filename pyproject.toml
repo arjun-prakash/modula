@@ -19,6 +19,7 @@ classifiers = [
 dependencies = [
     "jax[cuda12]>=0.4.30",
     "matplotlib>=3.9.4",
+    "optax>=0.2.4",
     "pyflyt>=0.21.0",
     "tqdm>=4.67.1",
 ]

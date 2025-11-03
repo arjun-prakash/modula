@@ -32,6 +32,7 @@ class Module:
         self.project = jax.jit(self.project)
         self.dualize = jax.jit(self.dualize)
         self.dual_ascent = jax.jit(self.dual_ascent)
+        self.admm_dual_ascent = jax.jit(self.admm_dual_ascent)
         self.init_dual_state = jax.jit(self.init_dual_state)
         self.online_dual_ascent = jax.jit(self.online_dual_ascent)
 
@@ -57,6 +58,11 @@ class Module:
 
     def dual_ascent(self, w, grad_w, target_norm):
         """Return tangent steps produced by a manifold dual-ascent routine."""
+
+        raise NotImplementedError
+
+    def admm_dual_ascent(self, w, grad_w, *, target_norm=1.0, **kwargs):
+        """Return tangents from an ADMM variant of the manifold dual-ascent routine."""
 
         raise NotImplementedError
 
@@ -120,6 +126,9 @@ class Bond(Module):
         return []
 
     def dual_ascent(self, w, grad_w, target_norm=1.0):
+        return []
+
+    def admm_dual_ascent(self, w, grad_w, *, target_norm=1.0, **kwargs):
         return []
 
     def init_dual_state(self, w):
@@ -192,6 +201,31 @@ class CompositeModule(Module):
                 w1,
                 grad_w1,
                 target_norm=target_norm * m1.mass / self.mass,
+            )
+
+            tangents = tangents0 + tangents1
+        else:
+            tangents = [0 * grad_weight for grad_weight in grad_w]
+
+        return tangents
+
+    def admm_dual_ascent(self, w, grad_w, *, target_norm=1.0, **kwargs):
+        if self.mass > 0:
+            m0, m1 = self.children
+            w0, w1 = w[:m0.atoms], w[m0.atoms:]
+            grad_w0, grad_w1 = grad_w[:m0.atoms], grad_w[m0.atoms:]
+
+            tangents0 = m0.admm_dual_ascent(
+                w0,
+                grad_w0,
+                target_norm=target_norm * m0.mass / self.mass / m1.sensitivity,
+                **kwargs,
+            )
+            tangents1 = m1.admm_dual_ascent(
+                w1,
+                grad_w1,
+                target_norm=target_norm * m1.mass / self.mass,
+                **kwargs,
             )
 
             tangents = tangents0 + tangents1
@@ -306,6 +340,25 @@ class TupleModule(Module):
                     w_m,
                     grad_w_m,
                     target_norm=target_norm * m.mass / self.mass,
+                )
+                tangents += tangents_m
+                w = w[m.atoms:]
+                grad_w = grad_w[m.atoms:]
+        else:
+            tangents = [0 * grad_weight for grad_weight in grad_w]
+        return tangents
+
+    def admm_dual_ascent(self, w, grad_w, *, target_norm=1.0, **kwargs):
+        if self.mass > 0:
+            tangents = []
+            for m in self.children:
+                w_m = w[:m.atoms]
+                grad_w_m = grad_w[:m.atoms]
+                tangents_m = m.admm_dual_ascent(
+                    w_m,
+                    grad_w_m,
+                    target_norm=target_norm * m.mass / self.mass,
+                    **kwargs,
                 )
                 tangents += tangents_m
                 w = w[m.atoms:]

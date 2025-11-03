@@ -63,11 +63,11 @@ def build_maxpool_cnn(num_classes=10):
     cnn = Linear(num_classes, 4 * 4 * 128)
     cnn @= Flatten()
     cnn @= MaxPool2D(pool_size=2)
-    cnn @= ReLU() @ Conv2D(64, 128, kernel_size=3)
+    cnn @= ReLU() @ Conv2D(64, 128, kernel_size=3, retract_enabled=False)
     cnn @= MaxPool2D(pool_size=2)
-    cnn @= ReLU() @ Conv2D(32, 64, kernel_size=3)
+    cnn @= ReLU() @ Conv2D(32, 64, kernel_size=3, retract_enabled=False)
     cnn @= MaxPool2D(pool_size=2)
-    cnn @= ReLU() @ Conv2D(3, 32, kernel_size=3)
+    cnn @= ReLU() @ Conv2D(3, 32, kernel_size=3, retract_enabled=False)
     cnn.jit()
     return cnn
 

@@ -120,6 +120,44 @@ def _dual_ascent(
 
 
 
+@functools.partial(jax.jit, static_argnames=('steps',))
+def _admm_dual_ascent(
+    w: Array,
+    g: Array,
+    *,
+    steps: int,
+    rho: float,
+) -> Array:
+    rho = jnp.asarray(rho, dtype=w.dtype)
+    inv_rho = 1.0 / rho
+    inv_rho_sq = inv_rho * inv_rho
+
+    lambda_init = -0.25 * (w.T @ g + g.T @ w)
+    x_init = g + 2.0 * w @ lambda_init
+    omega_init = jnp.zeros_like(x_init)
+
+    def body_fn(_, state):
+        lam, x, omega = state
+
+        tmp = inv_rho * omega + x - g
+        p = w.T @ tmp
+        lam_upd = 0.25 * (p + p.T)
+
+        b = g + 2.0 * w @ lam_upd - inv_rho * omega
+        cols = b.shape[-1]
+        eye = jnp.eye(cols, dtype=b.dtype)
+        p_pos = 0.5 * (eye + matrix_sign(b.T @ b - inv_rho_sq * eye))
+
+        x_upd = (b - inv_rho * matrix_sign(b)) @ p_pos
+        omega_upd = omega + rho * (x_upd - 2.0 * w @ lam_upd - g)
+
+        return lam_upd, x_upd, omega_upd
+
+    lam_final, _, _ = jax.lax.fori_loop(0, steps, body_fn, (lambda_init, x_init, omega_init))
+    return matrix_sign(g + 2.0 * w @ lam_final)
+
+
+
 @jax.jit
 def _online_dual_ascent_step(
     weight: Array,
@@ -243,6 +281,32 @@ class Linear(Atom):
 
         return [tangent]
 
+    def admm_dual_ascent(self, w, grad_w, *, target_norm=1.0, steps=10, rho=4.0):
+        weight = w[0]
+        grad = grad_w[0]
+
+        transpose = weight.shape[0] < weight.shape[1]
+        if transpose:
+            weight_t = weight.T
+            grad_t = grad.T
+        else:
+            weight_t = weight
+            grad_t = grad
+
+        tangent_t = _admm_dual_ascent(
+            weight_t,
+            grad_t,
+            steps=steps,
+            rho=rho,
+        )
+
+        if transpose:
+            tangent_t = tangent_t.T
+
+        target_norm = jnp.asarray(target_norm, dtype=weight.dtype)
+        tangent = target_norm * tangent_t
+        return [tangent]
+
     def init_dual_state(self, w):
         weight = w[0]
         transpose = weight.shape[0] < weight.shape[1]
@@ -364,7 +428,7 @@ def dampen_dual_state(state: Any, *, factor: float = 0.25, zero_velocity: bool =
         """
         Recursively damp the dual state after a retraction.
 
-        - For (Λ, V) tuples (Linear: [ (Λ, V) ], Conv2D: [ (Λ[k,k], V[k,k]) ]):
+        - For (Λ, V) tuples (Linear: [ (Λ, V) ], Conv2D: [ (Λ, V) ]):
             Λ ← factor · Λ
             V ← 0            if zero_velocity else factor · V
         - Leaves non-(Λ,V) leaves (e.g., Bias state vectors) unchanged.
@@ -415,12 +479,20 @@ class Conv2D(Atom):
         # same factor you already use, just centralized
         return jnp.sqrt(self.d_out / self.d_in) / (self.k ** 2) * target_norm
 
-    def _per_slice(self, input, op):
-        """Apply op([d_in, d_out]) at each spatial (k, k) position."""
-        return jax.vmap(
-            jax.vmap(op, in_axes=0, out_axes=0),
-            in_axes=0, out_axes=0
-        )(input)
+    def _flatten_kernel(self, kernel: Array) -> Array:
+        """Reshape [k, k, d_in, d_out] into [(k*k*d_in), d_out]."""
+        return kernel.reshape(self.k * self.k * self.d_in, self.d_out)
+
+    def _reshape_kernel(self, matrix: Array) -> Array:
+        """Inverse of _flatten_kernel."""
+        return matrix.reshape(self.k, self.k, self.d_in, self.d_out)
+
+    def _project_flat(self, matrix: Array) -> Array:
+        """Apply matrix_sign in the appropriate orientation for flattened kernels."""
+        transpose = matrix.shape[0] < matrix.shape[1]
+        mat = matrix.T if transpose else matrix
+        proj = matrix_sign(mat)
+        return proj.T if transpose else proj
 
     
 
@@ -440,18 +512,22 @@ class Conv2D(Atom):
     def initialize(self, key):
         shape = (self.k, self.k, self.d_in, self.d_out)           # [k, k, d_in, d_out]
         weight = jax.random.normal(key, shape=shape)
-        weight = self._per_slice(weight, matrix_sign)                    # per-slice UV^T
-        return [self._scale() * weight]
+        weight_flat = self._flatten_kernel(weight)
+        weight_proj = self._project_flat(weight_flat)
+        return [self._scale() * self._reshape_kernel(weight_proj)]
 
     def project(self, w):
         weight = w[0]                                              # [k, k, d_in, d_out]
-        weight = self._per_slice(weight, matrix_sign)
-        return [self._scale() * weight]
+        weight_flat = self._flatten_kernel(weight)
+        weight_proj = self._project_flat(weight_flat)
+        return [self._scale() * self._reshape_kernel(weight_proj)]
 
-    # --- dualize: per-slice msign(grad) + fixed scale (times target_norm) ---
+    # --- dualize: flattened msign(grad) + fixed scale (times target_norm) ---
     def dualize(self, grad_w, target_norm=1.0):
         grad = grad_w[0]                                           # [k, k, d_in, d_out]
-        out = self._per_slice(grad, matrix_sign)
+        grad_flat = self._flatten_kernel(grad)
+        out_flat = matrix_sign(grad_flat)
+        out = self._reshape_kernel(out_flat)
         return [self._scale(target_norm) * out]
 
     def retract(self, w):
@@ -459,21 +535,20 @@ class Conv2D(Atom):
             return w  # no-op
 
         W = w[0]  # [k,k,d_in,d_out]
-        if self.d_in >= self.d_out:
-            W_ret = self._per_slice(W, matrix_sign)
-        else:
-            WT = jnp.swapaxes(W, -2, -1)
-            WT = self._per_slice(WT, matrix_sign)
-            W_ret = jnp.swapaxes(WT, -2, -1)
+        W_flat = self._flatten_kernel(W)
+        W_proj = self._project_flat(W_flat)
+        W_ret = self._reshape_kernel(W_proj)
         # if you also carry a gain parameter (W, g), keep g unchanged
         return [W_ret] if len(w) == 1 else [W_ret, *w[1:]]
 
 
     def init_dual_state(self, w):
-    # Λ lives in the smaller side’s space so the matmul contracts correctly
-        d_hat = self.d_out if self.d_in >= self.d_out else self.d_in
+        # Λ lives in the smaller side’s space so the matmul contracts correctly
+        rows = self.k * self.k * self.d_in
+        cols = self.d_out
+        dim = rows if rows < cols else cols
         dtype = w[0].dtype if w else jnp.float32
-        lam0 = jnp.zeros((self.k, self.k, d_hat, d_hat), dtype=dtype)
+        lam0 = jnp.zeros((dim, dim), dtype=dtype)
         vel0 = jnp.zeros_like(lam0)
         return [(lam0, vel0)]
 
@@ -493,33 +568,18 @@ class Conv2D(Atom):
         beta  = jnp.asarray(beta,  dtype=W.dtype)
         target_scale = jnp.asarray(self._scale(target_norm), dtype=W.dtype)
 
-        if self.d_in >= self.d_out:
-            # TALL: column-Stiefel, right-Λ (matches _online_dual_ascent_step as-is)
-            def per_slice(Ws, Gs, Ls, Vs):
-                T, Ln, Vn = _online_dual_ascent_step(
-                    Ws, Gs, Ls, Vs, target_norm=target_scale, alpha=alpha, beta=beta
-                )
-                return T, Ln, Vn
-            tangent, Λn, Vn = jax.vmap(
-                jax.vmap(per_slice, in_axes=(0,0,0,0), out_axes=(0,0,0)),
-                in_axes=(0,0,0,0), out_axes=(0,0,0)
-            )(W, G, Λ, V)
+        W_flat = self._flatten_kernel(W)
+        G_flat = self._flatten_kernel(G)
 
-        else:
-            # WIDE: row-Stiefel, left-Λ
-            # reuse the same step by transposing slices and computing in the "tall" orientation
-            def per_slice(Ws, Gs, Ls, Vs):
-                WsT = jnp.swapaxes(Ws, -2, -1)  # [d_out, d_in]
-                GsT = jnp.swapaxes(Gs, -2, -1)
-                Tt, Ln, Vn = _online_dual_ascent_step(
-                    WsT, GsT, Ls, Vs, target_norm=target_scale, alpha=alpha, beta=beta
-                )
-                T  = jnp.swapaxes(Tt, -2, -1)   # back to [d_in, d_out]
-                return T, Ln, Vn
-            tangent, Λn, Vn = jax.vmap(
-                jax.vmap(per_slice, in_axes=(0,0,0,0), out_axes=(0,0,0)),
-                in_axes=(0,0,0,0), out_axes=(0,0,0)
-            )(W, G, Λ, V)
+        transpose = W_flat.shape[0] < W_flat.shape[1]
+        W_t = W_flat.T if transpose else W_flat
+        G_t = G_flat.T if transpose else G_flat
+
+        tangent_t, Λn, Vn = _online_dual_ascent_step(
+            W_t, G_t, Λ, V, target_norm=target_scale, alpha=alpha, beta=beta
+        )
+        tangent_flat = tangent_t.T if transpose else tangent_t
+        tangent = self._reshape_kernel(tangent_flat)
 
         return [tangent], [(Λn, Vn)]
 
