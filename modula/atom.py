@@ -386,6 +386,95 @@ class Bias(Atom):
         return tangent, (state if state else self.init_dual_state(w))
 
 
+class BatchNorm2D(Atom):
+    """Batch normalization for 2D feature maps with constrained scale parameter.
+    
+    Scale parameter γ is constrained to have norm ≤ 1 to maintain Lipschitz constraint.
+    Input shape: [N, H, W, C]
+    
+    Weight format: Single array [scale, shift] concatenated, shape [2, C]
+    """
+    def __init__(self, num_features, momentum=0.9, eps=1e-5):
+        super().__init__()
+        self.num_features = num_features
+        self.momentum = momentum
+        self.eps = eps
+        self.smooth = True
+        self.mass = 1
+        self.sensitivity = 1
+        
+        # Running statistics (not trainable)
+        self.running_mean = None
+        self.running_var = None
+        self.num_batches_tracked = 0
+
+    def forward(self, x, w):
+        # x shape: [N, H, W, C]
+        # w[0] shape: [2, C] where w[0][0] is scale, w[0][1] is shift
+        params = w[0]  # [2, C]
+        scale = params[0]  # [C]
+        shift = params[1]  # [C]
+        
+        # Compute batch statistics
+        mean = jnp.mean(x, axis=(0, 1, 2), keepdims=True)  # [1, 1, 1, C]
+        var = jnp.var(x, axis=(0, 1, 2), keepdims=True)    # [1, 1, 1, C]
+        
+        # Normalize
+        x_norm = (x - mean) / jnp.sqrt(var + self.eps)
+        
+        # Scale and shift (broadcast over batch and spatial dimensions)
+        return scale[None, None, None, :] * x_norm + shift[None, None, None, :]
+
+    def initialize(self, key):
+        # Initialize as [2, C] array
+        params = jnp.stack([
+            jnp.ones((self.num_features,), dtype=jnp.float32) * 0.1,  # scale
+            jnp.zeros((self.num_features,), dtype=jnp.float32)  # shift
+        ])
+        return [params]
+
+    def project(self, w):
+        params = w[0]  # [2, C]
+        scale = params[0]
+        shift = params[1]
+        
+        # Constrain scale to have norm ≤ 1
+        scale_norm = jnp.linalg.norm(scale)
+        scale = jnp.where(scale_norm > 1.0, scale / scale_norm, scale)
+        
+        return [jnp.stack([scale, shift])]
+
+    def retract(self, w):
+        # Same as project - constrain scale norm
+        return self.project(w)
+
+    def dualize(self, grad_w, target_norm=1.0):
+        grad_params = grad_w[0]  # [2, C]
+        grad_scale = grad_params[0]
+        grad_shift = grad_params[1]
+        
+        # Normalize scale gradient
+        scale_norm = jnp.linalg.norm(grad_scale)
+        d_scale = grad_scale / (scale_norm + 1e-12) * target_norm
+        
+        # Normalize shift gradient
+        shift_norm = jnp.linalg.norm(grad_shift)
+        d_shift = grad_shift / (shift_norm + 1e-12) * target_norm
+        
+        return [jnp.stack([d_scale, d_shift])]
+
+    def dual_ascent(self, w, grad_w, target_norm=1.0):
+        return self.dualize(grad_w, target_norm)
+
+    def init_dual_state(self, w):
+        # Simple state matching the weight shape
+        return [jnp.zeros_like(w[0])]
+
+    def online_dual_ascent(self, state, w, grad_w, *, target_norm=1.0, alpha=1e-2, beta=0.9):
+        tangent = self.dualize(grad_w, target_norm)
+        return tangent, (state if state else self.init_dual_state(w))
+
+
 class ProbDist(Linear):
     def retract(self, w):
         weight = w[0]
@@ -464,12 +553,12 @@ def dampen_dual_state(state: Any, *, factor: float = 0.25, zero_velocity: bool =
         return _rec(state)
 
 class Conv2D(Atom):
-    # no stride and padding for simplicity
-    def __init__(self, d_in, d_out, kernel_size, retract_enabled: bool = True):
+    def __init__(self, d_in, d_out, kernel_size, stride=1, retract_enabled: bool = True):
         super().__init__()
         self.d_in  = d_in
         self.d_out = d_out
-        self.k = kernel_size # add kernel size
+        self.k = kernel_size
+        self.stride = stride
         self.smooth = True
         self.mass = 1 
         self.sensitivity = 1
@@ -504,7 +593,7 @@ class Conv2D(Atom):
         return jax.lax.conv_general_dilated(
             lhs=x,
             rhs=weights,
-            window_strides=(1,1),
+            window_strides=(self.stride, self.stride),
             padding="SAME",
             dimension_numbers=('NHWC', 'HWIO', 'NHWC')
         )
@@ -583,6 +672,118 @@ class Conv2D(Atom):
 
         return [tangent], [(Λn, Vn)]
 
+
+class Conv2DTranspose(Atom):
+    """Transposed convolution (deconvolution) for upsampling."""
+    
+    def __init__(self, d_in, d_out, kernel_size, stride=1, retract_enabled: bool = True):
+        super().__init__()
+        self.d_in  = d_in
+        self.d_out = d_out
+        self.k = kernel_size
+        self.stride = stride
+        self.smooth = True
+        self.mass = 1 
+        self.sensitivity = 1
+        self.retract_enabled = retract_enabled
+
+    def _scale(self, target_norm: float = 1.0):
+        return jnp.sqrt(self.d_out / self.d_in) / (self.k ** 2) * target_norm
+
+    def _flatten_kernel(self, kernel: Array) -> Array:
+        """Reshape [k, k, d_in, d_out] into [(k*k*d_in), d_out]."""
+        return kernel.reshape(self.k * self.k * self.d_in, self.d_out)
+
+    def _reshape_kernel(self, matrix: Array) -> Array:
+        """Inverse of _flatten_kernel."""
+        return matrix.reshape(self.k, self.k, self.d_in, self.d_out)
+
+    def _project_flat(self, matrix: Array) -> Array:
+        """Apply matrix_sign in the appropriate orientation for flattened kernels."""
+        transpose = matrix.shape[0] < matrix.shape[1]
+        mat = matrix.T if transpose else matrix
+        proj = matrix_sign(mat)
+        return proj.T if transpose else proj
+
+    def forward(self, x, w):
+        # x shape is [N, H, W, C_in]
+        weights = w[0]  # shape is [k, k, d_in, d_out]
+
+        return jax.lax.conv_transpose(
+            lhs=x,
+            rhs=weights,
+            strides=(self.stride, self.stride),
+            padding='SAME',
+            dimension_numbers=('NHWC', 'HWIO', 'NHWC')
+        )
+
+    def initialize(self, key):
+        shape = (self.k, self.k, self.d_in, self.d_out)
+        weight = jax.random.normal(key, shape=shape)
+        weight_flat = self._flatten_kernel(weight)
+        weight_proj = self._project_flat(weight_flat)
+        return [self._scale() * self._reshape_kernel(weight_proj)]
+
+    def project(self, w):
+        weight = w[0]
+        weight_flat = self._flatten_kernel(weight)
+        weight_proj = self._project_flat(weight_flat)
+        return [self._scale() * self._reshape_kernel(weight_proj)]
+
+    def dualize(self, grad_w, target_norm=1.0):
+        grad = grad_w[0]
+        grad_flat = self._flatten_kernel(grad)
+        out_flat = matrix_sign(grad_flat)
+        out = self._reshape_kernel(out_flat)
+        return [self._scale(target_norm) * out]
+
+    def retract(self, w):
+        if not self.retract_enabled:
+            return w
+
+        W = w[0]
+        W_flat = self._flatten_kernel(W)
+        W_proj = self._project_flat(W_flat)
+        W_ret = self._reshape_kernel(W_proj)
+        return [W_ret] if len(w) == 1 else [W_ret, *w[1:]]
+
+    def init_dual_state(self, w):
+        rows = self.k * self.k * self.d_in
+        cols = self.d_out
+        dim = rows if rows < cols else cols
+        dtype = w[0].dtype if w else jnp.float32
+        lam0 = jnp.zeros((dim, dim), dtype=dtype)
+        vel0 = jnp.zeros_like(lam0)
+        return [(lam0, vel0)]
+
+    def online_dual_ascent(
+        self, state, w, grad_w, *, target_norm: float = 1.0, alpha: float = 1e-2, beta: float = 0.9
+    ):
+        W = w[0]
+        G = grad_w[0]
+        if not state:
+            Λ, V = self.init_dual_state(w)[0]
+        else:
+            Λ, V = state[0]
+
+        alpha = jnp.asarray(alpha, dtype=W.dtype)
+        beta  = jnp.asarray(beta,  dtype=W.dtype)
+        target_scale = jnp.asarray(self._scale(target_norm), dtype=W.dtype)
+
+        W_flat = self._flatten_kernel(W)
+        G_flat = self._flatten_kernel(G)
+
+        transpose = W_flat.shape[0] < W_flat.shape[1]
+        W_t = W_flat.T if transpose else W_flat
+        G_t = G_flat.T if transpose else G_flat
+
+        tangent_t, Λn, Vn = _online_dual_ascent_step(
+            W_t, G_t, Λ, V, target_norm=target_scale, alpha=alpha, beta=beta
+        )
+        tangent_flat = tangent_t.T if transpose else tangent_t
+        tangent = self._reshape_kernel(tangent_flat)
+
+        return [tangent], [(Λn, Vn)]
 
 
 if __name__ == "__main__":

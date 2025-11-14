@@ -10,10 +10,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import trange
 
-from data.cifar100 import load_cifar100
+from data.cifar10 import load_cifar10
 from modula.abstract import Bond
-from modula.atom import Linear, Conv2D, dampen_dual_state
-from modula.bond import ReLU, Flatten, MaxPool2D
+from modula.atom import Linear, Conv2D, Conv2DTranspose, BatchNorm2D, dampen_dual_state
+from modula.bond import ReLU, LeakyReLU, Flatten, MaxPool2D
 
 METHOD_CHOICES = ("manifold", "manifold_online", "dualize", "descent")
 
@@ -51,7 +51,7 @@ class Tanh(Bond):
 
 
 def prepare_data() -> jnp.ndarray:
-    train_images, _, _, _ = load_cifar100(normalize=True)
+    train_images, _, _, _ = load_cifar10(normalize=True)
     images = jnp.asarray(train_images, dtype=jnp.float32)
     images = images * 2.0 - 1.0  # scale to [-1, 1]
     return images
@@ -63,25 +63,36 @@ def build_generator(
     hidden_dim: int,
     conv_channels: int = 64,
 ):
+    """
+    Generator architecture:
+    latent space 100 (gaussian noise)
+    dense 4 × 4 × 512 batchnorm ReLU
+    4×4 conv.T stride=2 256 batchnorm ReLU
+    4×4 conv.T stride=2 128 batchnorm ReLU
+    4×4 conv.T stride=2 64 batchnorm ReLU
+    4×4 conv.T stride=1 3 tanh (no batchnorm on output)
+    """
     height, width, channels = image_shape
-    base_channels = conv_channels
-    upscale_factor = 2
-    expanded_height = height * upscale_factor
-    expanded_width = width * upscale_factor
-    flatten_dim = expanded_height * expanded_width * base_channels
-
+    # Starting from 4×4 spatial size with 512 channels
+    start_size = 4
+    start_channels = 512
+    
+    # Build in reverse (bottom-up)
     generator = Tanh()
-    generator @= Conv2D(base_channels, channels, kernel_size=3, retract_enabled=False)
+    generator @= Conv2DTranspose(64, channels, kernel_size=4, stride=1, retract_enabled=False)
     generator @= ReLU()
-    generator @= MaxPool2D(pool_size=upscale_factor)
-    generator @= Conv2D(base_channels, base_channels, kernel_size=3, retract_enabled=False)
+    generator @= BatchNorm2D(64)
+    generator @= Conv2DTranspose(128, 64, kernel_size=4, stride=2)
     generator @= ReLU()
-    generator @= Conv2D(base_channels, base_channels, kernel_size=3, retract_enabled=False)
+    generator @= BatchNorm2D(128)
+    generator @= Conv2DTranspose(256, 128, kernel_size=4, stride=2)
     generator @= ReLU()
-    generator @= Reshape((expanded_height, expanded_width, base_channels))
-    generator @= Linear(flatten_dim, hidden_dim)
+    generator @= BatchNorm2D(256)
+    generator @= Conv2DTranspose(start_channels, 256, kernel_size=4, stride=2)
     generator @= ReLU()
-    generator @= Linear(hidden_dim, latent_dim)
+    generator @= BatchNorm2D(start_channels)
+    generator @= Reshape((start_size, start_size, start_channels))
+    generator @= Linear(start_size * start_size * start_channels, latent_dim)
     generator.jit()
     return generator
 
@@ -91,30 +102,41 @@ def build_discriminator(
     hidden_dim: int,
     conv_channels: int = 64,
 ):
+    """
+    Discriminator architecture:
+    Input Image 32×32×3
+    3×3 conv. stride=1 64 lReLU
+    3×3 conv. stride=2 128 lReLU
+    3×3 conv. stride=1 128 lReLU
+    3×3 conv. stride=2 256 lReLU
+    3×3 conv. stride=1 256 lReLU
+    3×3 conv. stride=2 512 lReLU
+    3×3 conv. stride=1 512 lReLU
+    dense 1
+    """
     height, width, channels = image_shape
-    conv1_channels = conv_channels
-    conv2_channels = max(conv_channels * 2, conv_channels)
-    pool_size = 2
-
-    def pooled_dim(size: int) -> int:
-        return ((size - pool_size) // pool_size) + 1
-
-    height_after_pool1 = pooled_dim(height)
-    width_after_pool1 = pooled_dim(width)
-    height_after_pool2 = pooled_dim(height_after_pool1)
-    width_after_pool2 = pooled_dim(width_after_pool1)
-    flatten_dim = height_after_pool2 * width_after_pool2 * conv2_channels
-
-    discriminator = Linear(1, hidden_dim)
-    discriminator @= ReLU()
-    discriminator @= Linear(hidden_dim, flatten_dim)
+    # After stride=2 three times: 32 -> 16 -> 8 -> 4
+    final_spatial_size = 4
+    final_channels = 512
+    flatten_dim = final_spatial_size * final_spatial_size * final_channels
+    
+    # Build in reverse (top-down)
+    discriminator = Linear(1, flatten_dim)
     discriminator @= Flatten()
-    discriminator @= MaxPool2D(pool_size=pool_size)
-    discriminator @= ReLU()
-    discriminator @= Conv2D(conv1_channels, conv2_channels, kernel_size=3)
-    discriminator @= MaxPool2D(pool_size=pool_size)
-    discriminator @= ReLU()
-    discriminator @= Conv2D(channels, conv1_channels, kernel_size=3)
+    discriminator @= LeakyReLU(negative_slope=0.2)
+    discriminator @= Conv2D(512, 512, kernel_size=3, stride=1)
+    discriminator @= LeakyReLU(negative_slope=0.2)
+    discriminator @= Conv2D(256, 512, kernel_size=3, stride=2)
+    discriminator @= LeakyReLU(negative_slope=0.2)
+    discriminator @= Conv2D(256, 256, kernel_size=3, stride=1)
+    discriminator @= LeakyReLU(negative_slope=0.2)
+    discriminator @= Conv2D(128, 256, kernel_size=3, stride=2)
+    discriminator @= LeakyReLU(negative_slope=0.2)
+    discriminator @= Conv2D(128, 128, kernel_size=3, stride=1)
+    discriminator @= LeakyReLU(negative_slope=0.2)
+    discriminator @= Conv2D(64, 128, kernel_size=3, stride=2)
+    discriminator @= LeakyReLU(negative_slope=0.2)
+    discriminator @= Conv2D(channels, 64, kernel_size=3, stride=1)
     discriminator.jit()
     return discriminator
 
@@ -290,7 +312,8 @@ def plot_losses(best_runs: Dict[str, Dict[str, object]], plots_dir: Path) -> Non
     ax_gen.legend()
     ax_disc.legend()
     fig.tight_layout()
-    fig.savefig(plots_dir / "cifar100_gan_loss_curves.png", dpi=300)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fig.savefig(plots_dir / f"lipschitz_gan_loss_curves_{timestamp}.png", dpi=300)
     plt.close(fig)
 
 
@@ -342,7 +365,7 @@ def save_samples(
             axis.axis("off")
 
         fig.tight_layout()
-        output_path = plots_dir / f"cifar100_gan_samples_{method}_{timestamp}.png"
+        output_path = plots_dir / f"lipschitz_gan_samples_{method}_{timestamp}.png"
         fig.savefig(output_path, dpi=300)
         plt.close(fig)
         sample_records.append((method, output_path))
@@ -417,7 +440,7 @@ def parse_args() -> argparse.Namespace:
         help="Learning rates to sweep",
     )
     parser.add_argument("--steps", type=int, default=1000, help="Training steps per learning rate")
-    parser.add_argument("--batch-size", type=int, default=256, help="Mini-batch size")
+    parser.add_argument("--batch-size", type=int, default=64, help="Mini-batch size")
     parser.add_argument("--seed", type=int, default=0, help="PRNG seed")
     parser.add_argument("--target-norm", type=float, default=1.0, help="Target norm for tangent updates")
     parser.add_argument("--hidden-width", type=int, default=512, help="Hidden layer width")
@@ -447,13 +470,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--results-path",
         type=Path,
-        default=Path("results/cifar100_gan_manifold_results.json"),
+        default=Path("results/lipschitz_gan_results.json"),
         help="Path to save sweep metrics",
     )
     parser.add_argument(
         "--plots-dir",
         type=Path,
-        default=Path("plots/cifar100"),
+        default=Path("plots/lipschitz_gan"),
         help="Directory for plot outputs",
     )
     parser.add_argument(

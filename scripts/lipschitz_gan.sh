@@ -18,4 +18,4 @@ module load python
 #uv run examples/gan.py --steps 5000 --learning-rate 5e-3 --method dualize
 #uv run examples/cifar_gan.py --steps 50000 --learning-rate 5e-3 --discriminator-method manifold_online --generator-method dualize 
 #uv run examples/cifar_gan.py --steps 50000 --learning-rate 5e-3 --discriminator-method dualize --generator-method dualize 
-uv run examples/cifar_gan.py --steps 50000 --learning-rate 5e-3 --discriminator-method manifold_online --generator-method dualize 
+uv run examples/cifar_lipschtz_gan.py --steps 50000 --learning-rate 5e-3 --discriminator-method manifold_online --generator-method dualize 

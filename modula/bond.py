@@ -13,6 +13,17 @@ class ReLU(Bond):
         return jnp.maximum(0, x)
 
 
+class LeakyReLU(Bond):
+    def __init__(self, negative_slope=0.01):
+        super().__init__()
+        self.smooth = False
+        self.sensitivity = 1
+        self.negative_slope = negative_slope
+
+    def forward(self, x, w):
+        return jnp.where(x >= 0, x, self.negative_slope * x)
+
+
 class GeLU(Bond):
     def __init__(self):
         super().__init__()
