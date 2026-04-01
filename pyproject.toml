@@ -21,7 +21,11 @@ dependencies = [
     "matplotlib>=3.9.4",
     "optax>=0.2.4",
     "pyflyt>=0.21.0",
+    "scipy>=1.13.1",
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
     "tqdm>=4.67.1",
+    "wandb>=0.22.0",
 ]
 
 

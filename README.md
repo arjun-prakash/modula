@@ -77,7 +77,7 @@ Also added online_manifold (for linear layers):
                     beta=dual_beta,
                 )
   weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
-  weights = [matrix_sign(weight_matrix) for weight_matrix in weights]  # retraction
+  weights = model.retract(weights)
 ```
 
 In short, Modula lets us think about the weight space of our neural network as a somewhat classical optimization space, complete with duality and projection operations.

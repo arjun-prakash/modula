@@ -13,7 +13,7 @@ from tqdm import trange
 
 import PyFlyt.gym_envs  # noqa: F401
 
-from modula.atom import Linear, matrix_sign
+from modula.atom import Linear
 from modula.bond import ReLU
 
 METHOD_CHOICES = ("descent", "dualize", "manifold_online")
@@ -189,7 +189,7 @@ def train_single_run(
                     beta=dual_beta,
                 )
                 weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
-                weights = [matrix_sign(weight_matrix) for weight_matrix in weights]
+                weights = model.retract(weights)
             elif method == "dualize":
                 directions = model.dualize(grad_weights, target_norm=target_norm)
                 weights = [w - learning_rate * direction for w, direction in zip(weights, directions)]

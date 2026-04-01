@@ -11,7 +11,7 @@ import numpy as np
 from tqdm import trange
 
 from data.cifar10 import load_cifar10
-from modula.atom import Linear, matrix_sign
+from modula.atom import Linear
 from modula.bond import ReLU
 
 METHOD_ALIASES = {
@@ -209,7 +209,7 @@ def train_class_pair_sequence(
                     beta=0.9,
                 )
                 weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
-                weights = [matrix_sign(weight_matrix) for weight_matrix in weights]
+                weights = model.retract(weights)
 
             elif method == "dualize":
                 directions = model.dualize(grad_weights, target_norm=target_norm)

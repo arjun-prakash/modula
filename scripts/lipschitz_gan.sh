@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=24:00:00
 #SBATCH --mem=64GB
-#SBATCH -p gpu --gres=gpu:2     # number of gpus per node
+#SBATCH -p gpu --gres=gpu:1     # number of gpus per node
 #SBATCH --constraint=geforce3090
 
 
@@ -15,7 +15,7 @@
 module load python
 #export PYTHONPATH=$(pwd):$PYTHONPATH
 
-#uv run examples/gan.py --steps 5000 --learning-rate 5e-3 --method dualize
-#uv run examples/cifar_gan.py --steps 50000 --learning-rate 5e-3 --discriminator-method manifold_online --generator-method dualize 
-#uv run examples/cifar_gan.py --steps 50000 --learning-rate 5e-3 --discriminator-method dualize --generator-method dualize 
-uv run examples/cifar_lipschtz_gan.py --steps 50000 --learning-rate 5e-3 --discriminator-method manifold_online --generator-method dualize 
+#uv run examples/cifar_lipschtz_gan.py --steps 5000 --generator-lrs 5e-2 --discriminator-lrs 5e-2 --discriminator-method manifold_online --generator-method dualize --use-wandb --wandb-project lipschitz-gan-gradients \
+#uv run examples/cifar_lipschtz_gan.py --steps 5000 --generator-lrs 5e-4 --discriminator-lrs 5e-2 --discriminator-method manifold_online --generator-method descent --use-wandb --wandb-project lipschitz-gan-gradients \
+uv run examples/cifar_lipschtz_gan.py --steps 100000 --generator-lrs 1e-4 --discriminator-lrs 0.5 --discriminator-method manifold_online --generator-method adam --use-wandb --wandb-project lipschitz-gan-gradients --save-model --no-gradient-penalty \
+#uv run examples/cifar_lipschtz_gan.py --steps 100000 --generator-lrs 1e-4 --discriminator-lrs 1e-4 --discriminator-method adam --generator-method adam --use-wandb --wandb-project lipschitz-gan-gradients --save-model --no-gradient-penalty \

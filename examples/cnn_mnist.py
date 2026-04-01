@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import trange
 
 from data.mnist import load_mnist
-from modula.atom import Linear, matrix_sign, Conv2D
+from modula.atom import Linear, Conv2D
 from modula.bond import ReLU, Flatten
 
 METHOD_CHOICES = ( "manifold_online", "dualize", "descent")
@@ -112,7 +112,7 @@ def train_single_run(model, base_key, method, learning_rate, steps, batch_size, 
         if method == "manifold":
             tangents = model.dual_ascent(weights, grad_weights, target_norm=target_norm)
             weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
-            weights = [matrix_sign(weight_matrix) for weight_matrix in weights]
+            weights = model.retract(weights)
 
         elif method == 'manifold_online':
             tangents, dual_state = model.online_dual_ascent(

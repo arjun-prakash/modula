@@ -1,0 +1,503 @@
+\RequirePackage{cleveref}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 1) Productivity / author note commands
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newcommand{\amy}[1]{{\color{red}[\textsc{Amy}: \emph{#1}]}}
+\newcommand{\samy}[2]{{\color{orange}\sout{#1}\color{orange}#2}}
+
+\newcommand{\arjun}[1]{{\color{blue}[\textsc{Arjun}: \emph{#1}]}}
+\newcommand{\sarjun}[2]{{\color{blue}\sout{#1}\color{blue}#2}}
+\newcommand{\enr}[1]{{\color{orange}[\textsc{Enrique}: \emph{#1}]}}
+\newcommand{\senr}[2]{{\color{orange}\sout{#1}\color{orange}#2}}
+\newcommand{\sadie}[1]{{\color{magenta}[\textsc{Sadie}: \emph{#1}]}}
+\newcommand{\ssadie}[2]{{\color{magenta}\sout{#1}\color{magenta}#2}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 2) Spaces / sets / basic objects (ML + optimization notation)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newcommand{\vecspace}[1][]{\calV}
+\newcommand{\dualspace}[1][]{\calV^{*}}
+\newcommand{\weightspace}[1][]{\calW^{*}}
+
+\newcommand{\tasknum}[1][]{\tau_{#1}}
+\newcommand{\outertasknum}[1][]{\bm{\phi}_{\tau}}
+
+\newcommand{\constr}[1][]{\iota_{\calC}}
+\newcommand{\constrSet}[1][]{\calC}
+\newcommand{\simplex}[1][]{\Delta}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 3) Main Optimization Notation
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newcommand{\msign}[1][]{\text{msign}(#1)}
+\newcommand{\holderexp}[1][]{\alpha_{#1}}
+\newcommand{\transpose}[1]{{#1}^{\top}}
+
+\newcommand{\grad}[1][]{\nabla_{#1}}
+\newcommand{\subgrad}[1][]{s_{#1}}
+
+\newcommand{\gr}[1][]{\bm{g}_{#1}}
+
+
+\DeclareDocumentCommand{\weights}{ O{} O{} o o }{%
+  \bm{w}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+% Important matrix notation
+
+\DeclareDocumentCommand{\Weights}{ O{} O{} o o }{%
+  \bm{W}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+\DeclareDocumentCommand{\Gr}{ O{} O{} o o }{%
+  \bm{G}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+\DeclareDocumentCommand{\Momentum}{ O{} O{} o o }{%
+  \bm{M}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+\DeclareDocumentCommand{\Orthogonal}{ O{} O{} o o }{%
+  \bm{O}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+\DeclareDocumentCommand{\Tangent}{ O{} O{} o o }{%
+  \bm{A}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+% ADMM specific subproblem notation
+
+\DeclareDocumentCommand{\MSubproblem}{ O{} O{} o o }{%
+  \bm{M}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+\DeclareDocumentCommand{\XSubproblem}{ O{} O{} o o }{%
+  \bm{X}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+\DeclareDocumentCommand{\OmSubproblem}{ O{} O{} o o }{%
+  \ensuremath{\Omega_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }}%
+}
+
+\newcommand{\direction}[1][]{\bm{t}_{#1}}
+\newcommand{\Expect}[0]{\mathbb{E}}
+
+\DeclareMathOperator\supp{supp}
+\DeclareMathOperator\prox{prox}
+\DeclareMathOperator\softmax{softmax}
+\DeclareMathOperator\dualize{dualize_{\Vert\cdot\Vert}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 4) Norms
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\DeclareDocumentCommand{\norm}{ o }{%
+  \lVert #1\rVert%
+}
+
+\DeclareDocumentCommand{\dualnorm}{ o }{%
+  \lVert #1\rVert^{\dagger}%
+}
+
+\DeclareDocumentCommand{\frobeniusnorm}{ o }{%
+  \lVert #1\rVert_{F}%
+}
+
+\newcommand{\snorm}[1]{\lVert {#1} \rVert_2}
+\newcommand{\rmsnorm}[1]{\lVert {#1} \rVert_{\text{RMS}}}
+\newcommand{\rmsrmsnorm}[1]{\lVert {#1} \rVert_{\text{RMS} \rightarrow \text{RMS}}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 5) Divergences / regularizers / dual variables / deltas
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newcommand{\diverg}[1][]{\D_{\psi}}
+\newcommand{\distgen}[1][]{\psi^{#1}}
+\newcommand{\reg}[1][]{R_{#1}}
+\newcommand{\dualvar}[1][]{\Lambda_{#1}}
+
+\newcommand{\change}[1][]{\Delta^{#1}}
+\newcommand{\major}[1][]{\lambda^{#1}}
+\newcommand{\sharpparam}[1][]{\lambda_{#1}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 6) Iteration / indexing counts
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newcommand{\numiters}[1][]{K_{#1}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 8) Deep network / architecture / losses / activation
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newcommand{\deepnet}[1][]{f_{#1}}
+
+\newcommand{\layer}[1][]{l_{#1}}
+\newcommand{\numlayers}[1][]{L_{#1}}
+\newcommand{\layerdim}[1][]{M_{#1}}
+
+\newcommand{\inputdim}[1][]{d}
+\newcommand{\outputdim}[1][]{K}
+
+\newcommand{\lossfunc}[1][]{\calL_{#1}}
+\newcommand{\batchloss}[1][]{\ell_{#1}}
+
+\newcommand{\nonlin}[1][]{\sigma^{#1}}
+\newcommand{\relu}[1][]{ReLU }
+
+\newcommand{\firstlip}[1][]{\alpha}
+\newcommand{\secondlip}[1][]{\beta}
+
+\newcommand{\margin}[1][]{\gamma_{#1}}
+\newcommand{\radius}[1][]{r_{#1}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 9) Parameters / data / tensors (structured xparse macros)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\DeclareDocumentCommand{\bias}{ O{} O{} o o }{%
+  \mathbf{b}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+\DeclareDocumentCommand{\params}{ O{} O{} o o }{%
+  \bm{\theta}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+\DeclareDocumentCommand{\inner}{ O{} O{} o }{%
+  \bm{\theta}_{#1}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+\DeclareDocumentCommand{\outer}{ O{} O{} o }{%
+  \bm{\phi}_{#1}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+\DeclareDocumentCommand{\datax}{ O{} O{} o }{%
+  \bm{x}_{#1}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+\DeclareDocumentCommand{\datay}{ O{} O{} o }{%
+  \bm{y}_{#1}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+\DeclareDocumentCommand{\datadist}{ O{} O{} o }{%
+  \bm{p}_{#1}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 10) Linear algebra / derivatives of maps
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\DeclareDocumentCommand{\Hessian}{ O{} O{} o o }{%
+  \mathbf{H}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+\DeclareDocumentCommand{\Jacobian}{ O{} O{} o o }{%
+  \mathbf{}{J}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+\DeclareDocumentCommand{\eigenvec}{ O{} O{} o o }{%
+  \mathbf{v}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+\newcommand{\eigenval}[1][]{\sigma_{#1}}
+
+\DeclareDocumentCommand{\eigenval}{ O{} O{} o o }{%
+  \bm{\lambda}_{#1%
+    \IfValueTF{#4}{\lbrack #4\rbrack}%
+  {}}^{#2%
+    \IfValueTF{#3}{(#3)}{}%
+  }%
+}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 11) Theorem-like environments
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{claim}[theorem]{Claim}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{assumption}[theorem]{Assumption}
+\newtheorem{fact}[theorem]{Fact}
+\newtheorem{example}[theorem]{Example}
+\newtheorem{notation}[theorem]{Notation}
+\newtheorem{observation}[theorem]{Observation}
+\newtheorem{conjecture}[theorem]{Conjecture}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 12) Probability / expectation / moments
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Probability/expectation operators.  The ones ending in x should be used if you want
+% subscripts that go directly *below* the operator (in math mode); no x means the subscripts
+\renewcommand{\Pr}{{\bf Pr}}
+\newcommand{\Prx}{\mathop{\bf Pr\/}}
+\newcommand{\E}{{\bf E}}
+
+\newcommand{\Var}{{\bf Var}}
+\newcommand{\Varx}{\mathop{\bf Var\/}}
+\newcommand{\Cov}{{\bf Cov}}
+\newcommand{\Covx}{\mathop{\bf Cov\/}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 13) Shortcuts / accents / delimiters
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% shortcuts for symbol names that are too long to type
+\newcommand{\la}{\langle}
+\newcommand{\ra}{\rangle}
+\newcommand{\wh}{\widehat}
+\newcommand{\wt}{\widetilde}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 14) Blackboard bold sets
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% "blackboard-fonted" letters for the reals, naturals etc.
+\newcommand{\R}{\mathbb R}
+\newcommand{\N}{\mathbb N}
+\newcommand{\Z}{\mathbb Z}
+\newcommand{\F}{\mathbb F}
+\newcommand{\Q}{\mathbb Q}
+% \newcommand{\C}{\mathbb C}
+\newcommand{\Ex}{\mathbb{E}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 15) Roman operators / misc math operators
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% operators that should be typeset in Roman font
+\newcommand{\poly}{\mathrm{poly}}
+\newcommand{\polylog}{\mathrm{polylog}}
+\newcommand{\sgn}{\mathrm{sgn}}
+\newcommand{\avg}{\mathop{\mathrm{avg}}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 16) Complexity classes
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% complexity classes
+\newcommand{\NP}{\mathrm{NP}}
+\newcommand{\BPP}{\mathrm{BPP}}
+\newcommand{\DTIME}{\mathrm{DTIME}}
+\newcommand{\ZPTIME}{\mathrm{ZPTIME}}
+\newcommand{\BPTIME}{\mathrm{BPTIME}}
+\newcommand{\NTIME}{\mathrm{NTIME}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 17) Optimization instance tags
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% values associated to optimization algorithm instances
+\newcommand{\Opt}{{\mathsf{Opt}}}
+\newcommand{\Alg}{{\mathsf{Alg}}}
+\newcommand{\Lp}{{\mathsf{Lp}}}
+\newcommand{\Sdp}{{\mathsf{Sdp}}}
+\newcommand{\Exp}{{\mathsf{Exp}}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 18) Small sum/product variants
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% if you think the sum and product signs are too big in your math mode; x convention
+% as in the probability operators
+\newcommand{\littlesum}{{\textstyle \sum}}
+\newcommand{\littlesumx}{\mathop{{\textstyle \sum}}}
+\newcommand{\littleprod}{{\textstyle \prod}}
+\newcommand{\littleprodx}{\mathop{{\textstyle \prod}}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 19) Layout helpers
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% horizontal line across the page
+\newcommand{\horz}{
+\vspace{-.4in}
+\begin{center}
+\begin{tabular}{p{\textwidth}}\\
+\hline
+\end{tabular}
+\end{center}
+}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 20) Calligraphic letters
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% calligraphic letters
+\newcommand{\calA}{{\mathcal A}}
+\newcommand{\calB}{{\mathcal B}}
+\newcommand{\calC}{{\mathcal C}}
+\newcommand{\calD}{{\mathcal D}}
+\newcommand{\calE}{{\mathcal E}}
+\newcommand{\calF}{{\mathcal F}}
+\newcommand{\calG}{{\mathcal G}}
+\newcommand{\calH}{{\mathcal H}}
+\newcommand{\calI}{{\mathcal I}}
+\newcommand{\calJ}{{\mathcal J}}
+\newcommand{\calK}{{\mathcal K}}
+\newcommand{\calL}{{\mathcal L}}
+\newcommand{\calM}{{\mathcal M}}
+\newcommand{\calN}{{\mathcal N}}
+\newcommand{\calO}{{\mathcal O}}
+\newcommand{\calP}{{\mathcal P}}
+\newcommand{\calQ}{{\mathcal Q}}
+\newcommand{\calR}{{\mathcal R}}
+\newcommand{\calS}{{\mathcal S}}
+\newcommand{\calT}{{\mathcal T}}
+\newcommand{\calU}{{\mathcal U}}
+\newcommand{\calV}{{\mathcal V}}
+\newcommand{\calW}{{\mathcal W}}
+\newcommand{\calX}{{\mathcal X}}
+\newcommand{\calY}{{\mathcal Y}}
+\newcommand{\calZ}{{\mathcal Z}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 21) Bold letters (random variables / vectors / matrices)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% bold letters (useful for random variables)
+\renewcommand{\a}{{\boldsymbol a}}
+\renewcommand{\b}{{\boldsymbol b}}
+\renewcommand{\c}{{\boldsymbol c}}
+\renewcommand{\d}{{\boldsymbol d}}
+\newcommand{\e}{{\boldsymbol e}}
+\newcommand{\f}{{\boldsymbol f}}
+\newcommand{\g}{{\boldsymbol g}}
+\newcommand{\h}{{\boldsymbol h}}
+\renewcommand{\i}{{\boldsymbol i}}
+\renewcommand{\j}{{\boldsymbol j}}
+\renewcommand{\k}{{\boldsymbol k}}
+\newcommand{\m}{{\boldsymbol m}}
+\newcommand{\n}{{\boldsymbol n}}
+\renewcommand{\o}{{\boldsymbol o}}
+\newcommand{\p}{{\boldsymbol p}}
+\newcommand{\q}{{\boldsymbol q}}
+\renewcommand{\r}{{\boldsymbol r}}
+\newcommand{\s}{{\boldsymbol s}}
+\renewcommand{\t}{{\boldsymbol t}}
+\renewcommand{\u}{{\boldsymbol u}}
+\renewcommand{\v}{{\boldsymbol v}}
+\newcommand{\w}{{\boldsymbol w}}
+\newcommand{\x}{{\boldsymbol x}}
+\newcommand{\y}{{\boldsymbol y}}
+\newcommand{\z}{{\boldsymbol z}}
+\newcommand{\A}{{\boldsymbol A}}
+\newcommand{\B}{{\boldsymbol B}}
+\newcommand{\D}{{\boldsymbol D}}
+% \newcommand{\G}{{\boldsymbol G}}
+\renewcommand{\H}{{\boldsymbol H}}
+\newcommand{\I}{{\boldsymbol I}}
+\newcommand{\J}{{\boldsymbol J}}
+\newcommand{\K}{{\boldsymbol K}}
+\renewcommand{\L}{{\boldsymbol L}}
+\newcommand{\M}{{\boldsymbol M}}
+\renewcommand{\O}{{\boldsymbol O}}
+\renewcommand{\P}{\boldsymbol{P}}
+\renewcommand{\S}{{\boldsymbol S}}
+\newcommand{\T}{{\boldsymbol T}}
+\newcommand{\V}{{\boldsymbol V}}
+\newcommand{\W}{{\boldsymbol W}}
+\newcommand{\X}{{\boldsymbol X}}
+\newcommand{\Y}{{\boldsymbol Y}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 22) Added commands
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Added commands
+\newcommand{\mydef}[1]{\textbf{#1}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 23) Appendix tool
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Appendix tool
+
+\newif\ifappendix
+\NewEnviron{maybeappendix}[1]
+    {\ifappendix
+        \expandafter\global\expandafter\let\csname putmaybeappendix#1\endcsname\BODY%
+    \else
+        \expandafter\newcommand\csname putmaybeappendix#1\endcsname{}\BODY%
+    \fi}
+\newcommand{\putmaybeappendix}[1]{\csname putmaybeappendix#1\endcsname}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 24) Widebar / accents helper
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newcommand*\rel@kern[1]{\kern#1\dimexpr\macc@kerna}
+\newcommand*\widebar[1]{%
+  \begingroup
+  \def\mathaccent##1##2{%
+    \rel@kern{0.8}%
+    \overline{\rel@kern{-0.8}\macc@nucleus\rel@kern{0.2}}%
+    \rel@kern{-0.2}%
+  }%
+  \macc@depth\@ne
+  \let\math@bgroup\@empty \let\math@egroup\macc@set@skewchar
+  \mathsurround\z@ \frozen@everymath{\mathgroup\macc@group\relax}%
+  \macc@set@skewchar\relax
+  \let\mathaccentV\macc@nested@a
+  \macc@nested@a\relax111{#1}%
+  \endgroup
+}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 25) Fan-in / fan-out (init / architecture scalars)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newcommand{\fanin}[0]{\text{fan-in}}
+\newcommand{\fanout}[0]{\text{fan-out}}
+
+% Cref settings
+\newcommand{\probref}[1]{\hyperref[#1]{Problem~(\ref*{#1})}}
+\newcommand{\ruleref}[1]{\hyperref[#1]{Update rule~(\ref*{#1})}}
