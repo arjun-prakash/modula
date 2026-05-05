@@ -76,7 +76,7 @@ def main(argv=None):
                     method=method,
                     learning_rate=learning_rate,
                 ),
-                group="cifar100-benchmark",
+                group=args.wandb_group or "cifar100-benchmark",
                 tags=[dataset.name, method],
             )
             try:
@@ -91,11 +91,18 @@ def main(argv=None):
                     eval_train_samples=args.eval_train_samples,
                     seed=run_seed,
                     method=method,
-                    target_norm=args.target_norm,
                     dual_alpha=args.dual_alpha,
                     dual_beta=args.dual_beta,
                     admm_steps=args.admm_steps,
                     admm_rho=args.admm_rho,
+                    adam_weight_decay=args.adam_weight_decay,
+                    manifold_momentum=args.manifold_momentum,
+                    manifold_weight_decay=args.manifold_weight_decay,
+                    manifold_scaling=args.manifold_scaling,
+                    muon_scaling=args.muon_scaling,
+                    muon_momentum=args.muon_momentum,
+                    muon_weight_decay=args.muon_weight_decay,
+                    loss=args.loss,
                     logger=logger,
                     show_progress=not args.smoke_test,
                 )

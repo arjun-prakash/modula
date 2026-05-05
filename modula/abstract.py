@@ -30,9 +30,10 @@ class Module:
     def jit(self):
         self.forward = jax.jit(self.forward)
         self.project = jax.jit(self.project)
+        self.retract = jax.jit(self.retract)
         self.dualize = jax.jit(self.dualize)
         self.dual_ascent = jax.jit(self.dual_ascent)
-        self.admm_dual_ascent = jax.jit(self.admm_dual_ascent)
+        self.admm_dual_ascent = jax.jit(self.admm_dual_ascent, static_argnames=("steps", "rho"))
         self.init_dual_state = jax.jit(self.init_dual_state)
         self.online_dual_ascent = jax.jit(self.online_dual_ascent)
 

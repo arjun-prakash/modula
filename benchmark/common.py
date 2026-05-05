@@ -3,7 +3,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -15,12 +15,21 @@ from tqdm import tqdm
 
 from examples.data.cifar10 import load_cifar10
 from examples.data.cifar100 import load_cifar100
-from modula.abstract import CompositeModule, TupleModule
 from modula.atom import Conv2D, Linear
 from modula.bond import Flatten, MaxPool2D, ReLU
+from modula.manifold import matrix_sign
 
-METHOD_CHOICES = ("adam", "manifold", "manifold_online", "manifold_admm")
+MANIFOLD_METHODS = ("manifold", "manifold_online", "manifold_admm")
+METHOD_CHOICES = (
+    "adam",
+    "adamw",
+    "muon",
+    *MANIFOLD_METHODS,
+)
+MUON_SCALING_CHOICES = ("fan_ratio", "fan_max", "none")
+LOSS_CHOICES = ("cross_entropy", "mse")
 FEATURE_DIM = 4 * 4 * 128
+MLP_FEATURE_DIM = 64
 
 
 @dataclass
@@ -72,17 +81,67 @@ def add_common_arguments(
     parser.add_argument("--batch-size", type=int, default=default_batch_size, help="Mini-batch size")
     parser.add_argument("--eval-every", type=int, default=default_eval_every, help="Metric logging interval")
     parser.add_argument(
+        "--loss",
+        type=str,
+        default="cross_entropy",
+        choices=LOSS_CHOICES,
+        help="Training loss for classifier benchmarks",
+    )
+    parser.add_argument(
         "--eval-train-samples",
         type=int,
         default=1000,
         help="Train samples used for periodic eval (0 for the full train set)",
     )
     parser.add_argument("--seed", type=int, default=0, help="PRNG seed")
-    parser.add_argument("--target-norm", type=float, default=1.0, help="Target norm for manifold-family methods")
+    parser.add_argument(
+        "--adam-weight-decay",
+        type=float,
+        default=0.01,
+        help="Decoupled weight decay for AdamW baseline",
+    )
     parser.add_argument("--dual-alpha", type=float, default=2e-5, help="Alpha for manifold_online")
     parser.add_argument("--dual-beta", type=float, default=0.9, help="Beta for manifold_online")
     parser.add_argument("--admm-steps", type=int, default=10, help="ADMM inner steps for manifold_admm")
     parser.add_argument("--admm-rho", type=float, default=4.0, help="ADMM penalty for manifold_admm")
+    parser.add_argument(
+        "--manifold-momentum",
+        type=float,
+        default=0.9,
+        help="Momentum coefficient for manifold-family trunk updates",
+    )
+    parser.add_argument(
+        "--manifold-weight-decay",
+        type=float,
+        default=0.01,
+        help="Decoupled weight decay for manifold-family trunk updates",
+    )
+    parser.add_argument(
+        "--manifold-scaling",
+        type=str,
+        default="fan_ratio",
+        choices=MUON_SCALING_CHOICES,
+        help="Scaling rule for manifold-family trunk updates",
+    )
+    parser.add_argument(
+        "--muon-scaling",
+        type=str,
+        default="fan_ratio",
+        choices=MUON_SCALING_CHOICES,
+        help="Scaling rule for Muon trunk updates",
+    )
+    parser.add_argument(
+        "--muon-momentum",
+        type=float,
+        default=0.9,
+        help="Momentum coefficient for Muon trunk updates",
+    )
+    parser.add_argument(
+        "--muon-weight-decay",
+        type=float,
+        default=0.01,
+        help="Decoupled weight decay for Muon trunk updates",
+    )
     parser.add_argument(
         "--methods",
         type=str,
@@ -111,6 +170,12 @@ def add_common_arguments(
         type=str,
         default=f"{dataset_name}-benchmark",
         help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--wandb-group",
+        type=str,
+        default=None,
+        help="Weights & Biases group name (defaults to the benchmark group)",
     )
     parser.add_argument(
         "--wandb-entity",
@@ -216,7 +281,6 @@ def build_cifar_trunk():
     trunk @= MaxPool2D(pool_size=2)
     trunk @= ReLU() @ Conv2D(3, 32, kernel_size=3)
     trunk.jit()
-    trunk.admm_dual_ascent = jax.jit(trunk.admm_dual_ascent, static_argnames=("steps", "rho"))
     return trunk
 
 
@@ -226,8 +290,39 @@ def build_classifier_head(num_classes: int):
     return head
 
 
+def build_mlp_trunk(hidden_size: int = MLP_FEATURE_DIM):
+    trunk = ReLU() @ Linear(hidden_size, hidden_size)
+    trunk @= ReLU() @ Linear(hidden_size, 32 * 32 * 3)
+    trunk @= Flatten()
+    trunk.jit()
+    return trunk
+
+
+def build_wide3_mlp_trunk(hidden_size: int = MLP_FEATURE_DIM):
+    trunk = ReLU() @ Linear(4 * hidden_size, hidden_size)
+    trunk @= ReLU() @ Linear(hidden_size, 4 * hidden_size)
+    trunk @= ReLU() @ Linear(4 * hidden_size, 32 * 32 * 3)
+    trunk @= Flatten()
+    trunk.jit()
+    return trunk
+
+
+def build_mlp_classifier_head(num_classes: int, feature_dim: int = MLP_FEATURE_DIM):
+    head = Linear(num_classes, feature_dim)
+    head.jit()
+    return head
+
+
 def build_cifar_models(num_classes: int):
     return build_cifar_trunk(), build_classifier_head(num_classes)
+
+
+def build_cifar_mlp_models(num_classes: int, hidden_size: int = MLP_FEATURE_DIM, trunk: str = "default"):
+    if trunk == "default":
+        return build_mlp_trunk(hidden_size), build_mlp_classifier_head(num_classes, hidden_size)
+    if trunk == "wide3":
+        return build_wide3_mlp_trunk(hidden_size), build_mlp_classifier_head(num_classes, 4 * hidden_size)
+    raise ValueError(f"Unknown CIFAR MLP trunk: {trunk}")
 
 
 def make_predict_fn(trunk, head):
@@ -257,60 +352,75 @@ def _iter_weighted_atoms(module) -> List[Any]:
     return ordered_atoms
 
 
-def _iter_atom_target_norms(module, target_norm: float) -> List[float]:
-    atoms = int(getattr(module, "atoms", 0) or 0)
-    if atoms == 0:
-        return []
+def _manifold_update_scale(atom, *, scaling: str = "fan_ratio") -> float:
+    if scaling == "none":
+        return 1.0
+    if scaling == "fan_ratio":
+        if isinstance(atom, Conv2D):
+            return float((atom.k ** 2) * np.sqrt(atom.d_out / atom.d_in))
+        if isinstance(atom, Linear):
+            return float(np.sqrt(atom.fanout / atom.fanin))
+        raise ValueError(f"Unsupported manifold benchmark atom type: {type(atom).__name__}")
+    if scaling != "fan_max":
+        raise ValueError(f"Unknown manifold scaling: {scaling}")
 
-    if isinstance(module, CompositeModule):
-        if module.mass <= 0:
-            return [0.0] * atoms
-        m0, m1 = module.children
-        return (
-            _iter_atom_target_norms(m0, target_norm * m0.mass / module.mass / m1.sensitivity)
-            + _iter_atom_target_norms(m1, target_norm * m1.mass / module.mass)
-        )
-
-    if isinstance(module, TupleModule):
-        if module.mass <= 0:
-            return [0.0] * atoms
-        norms: List[float] = []
-        for child in module.children:
-            norms.extend(_iter_atom_target_norms(child, target_norm * child.mass / module.mass))
-        return norms
-
-    children = getattr(module, "children", ())
-    if not children:
-        return [float(target_norm)] * atoms
-
-    norms: List[float] = []
-    for child in children:
-        norms.extend(_iter_atom_target_norms(child, target_norm))
-    return norms
-
-
-def _manifold_update_scale(atom) -> float:
     if isinstance(atom, Conv2D):
-        return float((atom.k ** 2) * np.sqrt(atom.d_out / atom.d_in))
+        return float((atom.k ** 2) * np.sqrt(max(atom.d_in, atom.d_out)))
     if isinstance(atom, Linear):
-        return float(np.sqrt(atom.fanout / atom.fanin))
+        return float(np.sqrt(max(atom.fanin, atom.fanout)))
     raise ValueError(f"Unsupported manifold benchmark atom type: {type(atom).__name__}")
 
 
-def _scale_manifold_tangents(module, tangents, *, target_norm: float):
+def _muon_update_scale(atom, *, scaling: str) -> float:
+    if scaling == "none":
+        return 1.0
+    if scaling == "fan_ratio":
+        return _manifold_update_scale(atom)
+    if scaling != "fan_max":
+        raise ValueError(f"Unknown Muon scaling: {scaling}")
+
+    if isinstance(atom, Conv2D):
+        return float((atom.k ** 2) * np.sqrt(max(atom.d_in, atom.d_out)))
+    if isinstance(atom, Linear):
+        return float(np.sqrt(max(atom.fanin, atom.fanout)))
+    raise ValueError(f"Unsupported Muon benchmark atom type: {type(atom).__name__}")
+
+
+def _manifold_directions(module, tangents, *, scaling: str):
     atoms = _iter_weighted_atoms(module)
-    atom_target_norms = _iter_atom_target_norms(module, target_norm)
 
-    if len(atoms) != len(tangents) or len(atoms) != len(atom_target_norms):
-        raise ValueError(
-            f"Mismatch between atom metadata ({len(atoms)}), tangents ({len(tangents)}), and target norms ({len(atom_target_norms)})"
-        )
+    if len(atoms) != len(tangents):
+        raise ValueError(f"Mismatch between atom metadata ({len(atoms)}) and tangents ({len(tangents)})")
 
-    scaled_tangents = []
-    for atom, tangent, atom_target_norm in zip(atoms, tangents, atom_target_norms):
-        scale = _manifold_update_scale(atom) * float(atom_target_norm)
-        scaled_tangents.append(jnp.asarray(scale, dtype=tangent.dtype) * tangent)
-    return scaled_tangents
+    directions = []
+    for atom, tangent in zip(atoms, tangents):
+        scale = _manifold_update_scale(atom, scaling=scaling)
+        directions.append(jnp.asarray(scale, dtype=tangent.dtype) * tangent)
+    return directions
+
+
+def _muon_direction(atom, grad):
+    if isinstance(atom, Conv2D):
+        grad_flat = atom._flatten_kernel(grad)
+        direction_flat = matrix_sign(grad_flat)
+        return atom._reshape_kernel(direction_flat)
+    if isinstance(atom, Linear):
+        return matrix_sign(grad)
+    raise ValueError(f"Unsupported Muon benchmark atom type: {type(atom).__name__}")
+
+
+def _muon_directions(module, grads, *, scaling: str):
+    atoms = _iter_weighted_atoms(module)
+
+    if len(atoms) != len(grads):
+        raise ValueError(f"Mismatch between atom metadata ({len(atoms)}) and gradients ({len(grads)})")
+
+    directions = []
+    for atom, grad in zip(atoms, grads):
+        direction = _muon_direction(atom, grad)
+        scale = _muon_update_scale(atom, scaling=scaling)
+        directions.append(jnp.asarray(scale, dtype=direction.dtype) * direction)
+    return directions
 
 
 def _weight_to_stiefel_matrix(atom, weight):
@@ -383,9 +493,22 @@ def compute_accuracy(predict_fn, trunk_weights, head_weights, inputs, labels, *,
     return 100.0 * correct / total
 
 
-def _loss_fn(predict_fn, trunk_weights, head_weights, inputs, targets):
+def _mse_loss_fn(predict_fn, trunk_weights, head_weights, inputs, targets):
     logits = predict_fn(trunk_weights, head_weights, inputs)
     return jnp.mean((logits - targets) ** 2)
+
+
+def _cross_entropy_loss_fn(predict_fn, trunk_weights, head_weights, inputs, targets):
+    logits = predict_fn(trunk_weights, head_weights, inputs)
+    return jnp.mean(optax.softmax_cross_entropy(logits, targets))
+
+
+def _resolve_loss_fn(loss: str):
+    if loss == "cross_entropy":
+        return _cross_entropy_loss_fn
+    if loss == "mse":
+        return _mse_loss_fn
+    raise ValueError(f"Unknown loss: {loss}")
 
 
 def train_single_run(
@@ -400,11 +523,18 @@ def train_single_run(
     eval_train_samples: int,
     seed: int,
     method: str,
-    target_norm: float,
     dual_alpha: float,
     dual_beta: float,
     admm_steps: int,
     admm_rho: float,
+    adam_weight_decay: float = 0.01,
+    manifold_momentum: float = 0.9,
+    manifold_weight_decay: float = 0.01,
+    manifold_scaling: str = "fan_ratio",
+    muon_scaling: str = "fan_ratio",
+    muon_momentum: float = 0.9,
+    muon_weight_decay: float = 0.01,
+    loss: str = "cross_entropy",
     logger=None,
     show_progress: bool = True,
 ):
@@ -414,9 +544,13 @@ def train_single_run(
     trunk_weights = trunk.initialize(trunk_key)
     head_weights = head.initialize(head_key)
     predict_fn = make_predict_fn(trunk, head)
-    loss_and_grad = jax.jit(jax.value_and_grad(lambda tw, hw, x, y: _loss_fn(predict_fn, tw, hw, x, y), argnums=(0, 1)))
+    loss_fn = _resolve_loss_fn(loss)
+    loss_and_grad = jax.jit(jax.value_and_grad(lambda tw, hw, x, y: loss_fn(predict_fn, tw, hw, x, y), argnums=(0, 1)))
 
-    head_optimizer = optax.adam(learning_rate)
+    if method == "adamw":
+        head_optimizer = optax.adamw(learning_rate, weight_decay=adam_weight_decay)
+    else:
+        head_optimizer = optax.adam(learning_rate)
     head_opt_state = head_optimizer.init(head_weights)
 
     trunk_optimizer = None
@@ -424,8 +558,13 @@ def train_single_run(
     if method == "adam":
         trunk_optimizer = optax.adam(learning_rate)
         trunk_opt_state = trunk_optimizer.init(trunk_weights)
+    elif method == "adamw":
+        trunk_optimizer = optax.adamw(learning_rate, weight_decay=adam_weight_decay)
+        trunk_opt_state = trunk_optimizer.init(trunk_weights)
 
     dual_state = trunk.init_dual_state(trunk_weights) if method == "manifold_online" else None
+    momentum_state = [jnp.zeros_like(weight) for weight in trunk_weights] if method in MANIFOLD_METHODS else None
+    muon_momentum_state = [jnp.zeros_like(weight) for weight in trunk_weights] if method == "muon" else None
     progress = tqdm(range(steps), desc=f"{method} lr={learning_rate:.3g}", leave=False, disable=not show_progress)
     start_time = time.perf_counter()
     last_loss = 0.0
@@ -439,40 +578,64 @@ def train_single_run(
         head_updates, head_opt_state = head_optimizer.update(head_grads, head_opt_state, params=head_weights)
         head_weights = optax.apply_updates(head_weights, head_updates)
 
-        if method == "adam":
+        if method in ("adam", "adamw"):
             trunk_updates, trunk_opt_state = trunk_optimizer.update(trunk_grads, trunk_opt_state, params=trunk_weights)
             trunk_update_norm = tree_l2_norm(trunk_updates)
             trunk_weights = optax.apply_updates(trunk_weights, trunk_updates)
-        elif method == "manifold":
-            tangents = trunk.dual_ascent(trunk_weights, trunk_grads, target_norm=1.0)
-            scaled_tangents = _scale_manifold_tangents(trunk, tangents, target_norm=target_norm)
-            trunk_update_norm = tree_l2_norm(scaled_tangents)
-            trunk_weights = [weight - learning_rate * tangent for weight, tangent in zip(trunk_weights, scaled_tangents)]
-            trunk_weights = trunk.retract(trunk_weights)
-        elif method == "manifold_online":
-            tangents, dual_state = trunk.online_dual_ascent(
-                dual_state,
-                trunk_weights,
-                trunk_grads,
-                target_norm=1.0,
-                alpha=dual_alpha,
-                beta=dual_beta,
+        elif method == "muon":
+            muon_momentum_state = [
+                muon_momentum * momentum + grad for momentum, grad in zip(muon_momentum_state, trunk_grads)
+            ]
+            trunk_directions = _muon_directions(
+                trunk,
+                muon_momentum_state,
+                scaling=muon_scaling,
             )
-            scaled_tangents = _scale_manifold_tangents(trunk, tangents, target_norm=target_norm)
-            trunk_update_norm = tree_l2_norm(scaled_tangents)
-            trunk_weights = [weight - learning_rate * tangent for weight, tangent in zip(trunk_weights, scaled_tangents)]
-            trunk_weights = trunk.retract(trunk_weights)
-        elif method == "manifold_admm":
-            tangents = trunk.admm_dual_ascent(
-                trunk_weights,
-                trunk_grads,
-                target_norm=1.0,
-                steps=admm_steps,
-                rho=admm_rho,
+            trunk_updates = [
+                direction + muon_weight_decay * weight
+                for weight, direction in zip(trunk_weights, trunk_directions)
+            ]
+            trunk_update_norm = tree_l2_norm(trunk_updates)
+            trunk_weights = [
+                weight - learning_rate * update for weight, update in zip(trunk_weights, trunk_updates)
+            ]
+        elif method in MANIFOLD_METHODS:
+            momentum_state = [
+                manifold_momentum * momentum + grad for momentum, grad in zip(momentum_state, trunk_grads)
+            ]
+            solver_grads = momentum_state
+
+            if method == "manifold":
+                tangents = trunk.dual_ascent(trunk_weights, solver_grads)
+            elif method == "manifold_online":
+                tangents, dual_state = trunk.online_dual_ascent(
+                    dual_state,
+                    trunk_weights,
+                    solver_grads,
+                    alpha=dual_alpha,
+                    beta=dual_beta,
+                )
+            else:
+                tangents = trunk.admm_dual_ascent(
+                    trunk_weights,
+                    solver_grads,
+                    steps=admm_steps,
+                    rho=admm_rho,
+                )
+
+            trunk_directions = _manifold_directions(
+                trunk,
+                tangents,
+                scaling=manifold_scaling,
             )
-            scaled_tangents = _scale_manifold_tangents(trunk, tangents, target_norm=target_norm)
-            trunk_update_norm = tree_l2_norm(scaled_tangents)
-            trunk_weights = [weight - learning_rate * tangent for weight, tangent in zip(trunk_weights, scaled_tangents)]
+            trunk_updates = [
+                direction + manifold_weight_decay * weight
+                for weight, direction in zip(trunk_weights, trunk_directions)
+            ]
+            trunk_update_norm = tree_l2_norm(trunk_updates)
+            trunk_weights = [
+                weight - learning_rate * update for weight, update in zip(trunk_weights, trunk_updates)
+            ]
             trunk_weights = trunk.retract(trunk_weights)
         else:
             raise ValueError(f"Unknown method: {method}")
@@ -505,13 +668,15 @@ def train_single_run(
             )
 
             elapsed_time_so_far = time.perf_counter() - start_time
+            epoch = (step + 1) * batch_size / max(int(dataset.train_inputs.shape[0]), 1)
             stiefel_metrics = compute_trunk_stiefel_metrics(trunk, trunk_weights)
 
             if logger is not None:
                 logger.log(
                     {
-                        "step": int(step),
+                        "epoch": float(epoch),
                         "loss": float(loss_value),
+                        "loss_name": loss,
                         "train_accuracy": float(train_acc),
                         "test_accuracy": float(test_acc),
                         "trunk_grad_norm": float(trunk_grad_norm),
@@ -525,10 +690,11 @@ def train_single_run(
                 )
 
             progress.set_description(
-                f"{method} lr={learning_rate:.3g} | loss={float(loss_value):.4f} | train={train_acc:.2f}% | test={test_acc:.2f}%"
+                f"{method} lr={learning_rate:.3g} | epoch={epoch:.2f} | loss={float(loss_value):.4f} | train={train_acc:.2f}% | test={test_acc:.2f}%"
             )
 
     elapsed_time = time.perf_counter() - start_time
+    final_epoch = steps * batch_size / max(int(dataset.train_inputs.shape[0]), 1)
     final_train_accuracy = compute_accuracy(
         predict_fn,
         trunk_weights,
@@ -549,6 +715,8 @@ def train_single_run(
         "train_accuracy": float(final_train_accuracy),
         "test_accuracy": float(final_test_accuracy),
         "final_loss": float(last_loss),
+        "loss_name": loss,
+        "final_epoch": float(final_epoch),
         "training_time_seconds": float(elapsed_time),
         "seconds_per_step": float(elapsed_time / max(steps, 1)),
         **final_stiefel_metrics,
@@ -560,8 +728,16 @@ def train_single_run(
     return result
 
 
-def make_run_config(args, *, dataset_name: str, num_classes: int, method: str, learning_rate: float) -> Dict[str, Any]:
-    return {
+def make_run_config(
+    args,
+    *,
+    dataset_name: str,
+    num_classes: int,
+    method: str,
+    learning_rate: float,
+    hidden_size: int | None = None,
+) -> Dict[str, Any]:
+    config = {
         "dataset": dataset_name,
         "num_classes": int(num_classes),
         "method": method,
@@ -569,37 +745,63 @@ def make_run_config(args, *, dataset_name: str, num_classes: int, method: str, l
         "steps": int(args.steps),
         "batch_size": int(args.batch_size),
         "eval_every": int(args.eval_every),
+        "loss": str(args.loss),
         "eval_train_samples": int(args.eval_train_samples),
         "seed": int(args.seed),
-        "target_norm": float(args.target_norm),
+        "adam_weight_decay": float(args.adam_weight_decay),
         "dual_alpha": float(args.dual_alpha),
         "dual_beta": float(args.dual_beta),
         "admm_steps": int(args.admm_steps),
         "admm_rho": float(args.admm_rho),
+        "manifold_momentum": float(args.manifold_momentum),
+        "manifold_weight_decay": float(args.manifold_weight_decay),
+        "manifold_scaling": str(args.manifold_scaling),
+        "muon_scaling": str(args.muon_scaling),
+        "muon_momentum": float(args.muon_momentum),
+        "muon_weight_decay": float(args.muon_weight_decay),
+        "wandb_group": args.wandb_group,
         "synthetic_data": bool(args.synthetic_data),
         "smoke_test": bool(args.smoke_test),
     }
+    if hidden_size is not None:
+        config["hidden_size"] = int(hidden_size)
+    if hasattr(args, "trunk"):
+        config["trunk"] = str(args.trunk)
+    return config
 
 
 def make_results_config(args, *, dataset_name: str, num_classes: int) -> Dict[str, Any]:
-    return {
+    config = {
         "dataset": dataset_name,
         "num_classes": int(num_classes),
         "learning_rates": [float(rate) for rate in args.learning_rates],
         "steps": int(args.steps),
         "batch_size": int(args.batch_size),
         "eval_every": int(args.eval_every),
+        "loss": str(args.loss),
         "eval_train_samples": int(args.eval_train_samples),
         "seed": int(args.seed),
-        "target_norm": float(args.target_norm),
+        "adam_weight_decay": float(args.adam_weight_decay),
         "dual_alpha": float(args.dual_alpha),
         "dual_beta": float(args.dual_beta),
         "admm_steps": int(args.admm_steps),
         "admm_rho": float(args.admm_rho),
+        "manifold_momentum": float(args.manifold_momentum),
+        "manifold_weight_decay": float(args.manifold_weight_decay),
+        "manifold_scaling": str(args.manifold_scaling),
+        "muon_scaling": str(args.muon_scaling),
+        "muon_momentum": float(args.muon_momentum),
+        "muon_weight_decay": float(args.muon_weight_decay),
+        "wandb_group": args.wandb_group,
         "methods": list(args.methods),
         "synthetic_data": bool(args.synthetic_data),
         "smoke_test": bool(args.smoke_test),
     }
+    if hasattr(args, "hidden_sizes"):
+        config["hidden_sizes"] = [int(hidden_size) for hidden_size in args.hidden_sizes]
+    if hasattr(args, "trunk"):
+        config["trunk"] = str(args.trunk)
+    return config
 
 
 def save_results(
@@ -654,5 +856,6 @@ def print_run_summary(method: str, run_result: Mapping[str, Any]) -> None:
         f"train acc={run_result['train_accuracy']:.2f}% | "
         f"test acc={run_result['test_accuracy']:.2f}% | "
         f"loss={run_result['final_loss']:.4f} | "
+        f"epoch={run_result['final_epoch']:.2f} | "
         f"time={run_result['training_time_seconds']:.2f}s"
     )
