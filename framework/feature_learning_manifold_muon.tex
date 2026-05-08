@@ -1,0 +1,322 @@
+\documentclass[12pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage[hidelinks]{hyperref}
+
+\title{Feature Learning and MLP Manifold Muon}
+\author{}
+\date{\today}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\rms}{\operatorname{RMS}}
+\newcommand{\Stiefel}{\operatorname{Stiefel}}
+\newcommand{\Retr}{\operatorname{Retr}}
+\newcommand{\msign}{\operatorname{msign}}
+\newcommand{\fanin}{d_{\mathrm{in}}}
+\newcommand{\fanout}{d_{\mathrm{out}}}
+
+\begin{document}
+\maketitle
+
+\section{Purpose}
+
+This note records the current MLP-only interpretation of how Manifold Muon
+relates to hyperparameter transfer and the spectral feature-learning line of
+work. It focuses on three claims:
+\begin{enumerate}
+    \item the feature-learning requirement from
+    \href{https://arxiv.org/abs/2310.17813}{A Spectral Condition for Feature Learning};
+    \item why Manifold Muon with no outer scale factor can nevertheless show
+    strong hyperparameter transfer;
+    \item how the $\sqrt{\fanin/\fanout}$ RMS-to-RMS factor fits the spectral
+    scaling story.
+\end{enumerate}
+
+Throughout, consider an MLP hidden-layer matrix
+\[
+    W \in \R^{\fanout \times \fanin}.
+\]
+The discussion is for hidden matrix layers. Embeddings, biases, scalar
+parameters, and final classifier heads require separate conventions.
+
+\section{Feature-Learning Requirement}
+
+For a linear layer, the first-order change in preactivation is
+\[
+    \Delta y = \Delta W x.
+\]
+Thus the natural object is not only the coordinatewise size of $\Delta W$, but
+the size of $\Delta W$ as an operator acting on activations.
+
+The spectral feature-learning condition asks the weight and the update to have
+spectral norm on the order
+\[
+    \|W\|_2 = \Theta\!\left(\sqrt{\frac{\fanout}{\fanin}}\right),
+    \qquad
+    \|\Delta W\|_2 =
+    \Theta\!\left(\sqrt{\frac{\fanout}{\fanin}}\right).
+\]
+This makes the induced change in features remain nontrivial and non-exploding
+as width changes.
+
+\subsection{RMS-to-RMS Form}
+
+If vectors are measured in RMS norm,
+\[
+    \rms(x) = \frac{\|x\|_2}{\sqrt{d}},
+\]
+then the induced RMS-to-RMS operator norm of a matrix is
+\[
+    \|M\|_{\rms \to \rms}
+    :=
+    \max_{x \ne 0}
+    \frac{\rms(Mx)}{\rms(x)}
+    =
+    \sqrt{\frac{\fanin}{\fanout}}\|M\|_2.
+\]
+So the same feature-learning condition can be written as
+\[
+    \|W\|_{\rms \to \rms} = \Theta(1),
+    \qquad
+    \|\Delta W\|_{\rms \to \rms} = \Theta(1).
+\]
+
+This is the source of the $\sqrt{\fanin/\fanout}$ factor. It is a
+norm-conversion factor. If a tangent direction $A$ has $\|A\|_2 \le 1$ and we
+want the ambient update to have RMS-to-RMS size $\eta$, then the update is
+\[
+    \Delta W
+    =
+    -\eta
+    \sqrt{\frac{\fanout}{\fanin}}
+    A.
+\]
+The norm conversion contains $\sqrt{\fanin/\fanout}$, while the tangent
+multiplier contains its reciprocal $\sqrt{\fanout/\fanin}$.
+
+\section{What Manifold Muon Already Enforces}
+
+Manifold Muon is steepest descent under a spectral-norm constraint while the
+weights remain on a Stiefel-type constraint set. In its simplest unit-Stiefel
+form, it solves for a tangent direction $A$:
+\[
+    \min_A \langle G, A \rangle
+    \quad
+    \text{subject to}
+    \quad
+    \|A\|_2 \le 1,
+    \qquad
+    A^\top W + W^\top A = 0.
+\]
+Then it applies
+\[
+    W^+ = \Retr(W - \eta A).
+\]
+
+This construction already controls the same type of quantity used by the
+spectral feature-learning condition:
+\begin{itemize}
+    \item the Stiefel constraint fixes the spectral norm of $W$;
+    \item the Manifold Muon tangent problem fixes the spectral norm of $A$;
+    \item the tangent constraint removes first-order radial motion;
+    \item the retraction returns $W$ to the constraint set after each step.
+\end{itemize}
+
+Therefore, with no additional scale factor, unit-Stiefel Manifold Muon gives
+\[
+    \|W\|_2 = 1,
+    \qquad
+    \|\Delta W\|_2 \lesssim \eta
+\]
+up to finite-step and retraction effects.
+
+\section{Why No-Scale Manifold Muon Can Transfer}
+
+The no-scale setting is not arbitrary. It already imposes width-stable
+spectral geometry. In square hidden MLP layers, it exactly matches the spectral
+feature-learning condition, because
+\[
+    \fanin = \fanout
+    \quad\Longrightarrow\quad
+    \sqrt{\frac{\fanout}{\fanin}} = 1.
+\]
+Thus for a square hidden layer, no-scale Manifold Muon has
+\[
+    \|W\|_2 = 1,
+    \qquad
+    \|\Delta W\|_2 \lesssim \eta,
+\]
+which is precisely the constant-width version of the required spectral scaling.
+
+This gives a direct explanation for good hyperparameter transfer in MLPs whose
+width-varying hidden layers are square: the Stiefel constraint and the
+unit-spectral tangent constraint already enforce the feature-learning
+geometry.
+
+\subsection{Rectangular Input Layers}
+
+The more delicate case is a rectangular layer, for example the first layer of a
+CIFAR MLP:
+\[
+    W \in \R^{H \times 3072}.
+\]
+If $H < 3072$, unit-Stiefel projection typically gives row-orthonormal weights:
+\[
+    WW^\top = I_H,
+    \qquad
+    \|W\|_2 = 1.
+\]
+The worst-case RMS-to-RMS feature-learning condition would instead ask for
+\[
+    \|W\|_2
+    \asymp
+    \sqrt{\frac{H}{3072}}.
+\]
+So unit-Stiefel no-scale Manifold Muon is not generally identical to the
+formal worst-case spectral rule for rectangular layers.
+
+However, row-orthonormal weights have an important average-case property. For
+isotropic inputs with unit RMS,
+\[
+    \mathbb{E}\|Wx\|_2^2 \approx H,
+    \qquad
+    \rms(Wx) \approx 1.
+\]
+The same intuition can apply to Manifold Muon tangents. Even if the worst-case
+RMS-to-RMS operator norm is too large, the batch RMS of $Ax$ can remain stable
+when the input directions are sufficiently spread out.
+
+This suggests the following interpretation:
+\begin{itemize}
+    \item no-scale Manifold Muon is exactly feature-learning aligned for square
+    hidden layers;
+    \item rectangular row-Stiefel layers can still preserve typical RMS signal
+    and update sizes;
+    \item retraction prevents training-time drift away from that geometry.
+\end{itemize}
+
+This is a weaker statement than the worst-case spectral condition, but it is a
+plausible mechanism behind strong no-scale transfer in current MLP
+experiments.
+
+\section{Scaled-Stiefel Feature-Learning Variant}
+
+If the goal is to match the spectral feature-learning condition in worst-case
+RMS-to-RMS operator norm, the clean construction is a scaled Stiefel manifold.
+Define
+\[
+    r = \sqrt{\frac{\fanout}{\fanin}},
+    \qquad
+    W = rQ,
+    \qquad
+    Q \in \Stiefel.
+\]
+Then
+\[
+    \|W\|_2 = r,
+    \qquad
+    \|W\|_{\rms \to \rms} = 1.
+\]
+
+Run the Manifold Muon tangent solve on the unit-Stiefel variable $Q$, producing
+a tangent $A$ with $\|A\|_2 \le 1$, and apply the ambient update
+\[
+    \Delta W = -\eta r A.
+\]
+Then
+\[
+    \|\Delta W\|_2 \lesssim \eta r,
+    \qquad
+    \|\Delta W\|_{\rms \to \rms} \lesssim \eta.
+\]
+This directly matches the spectral feature-learning requirement for both the
+weight and the update:
+\[
+    \sqrt{\frac{\fanin}{\fanout}}\|W\|_2 = \Theta(1),
+    \qquad
+    \sqrt{\frac{\fanin}{\fanout}}\|\Delta W\|_2 = \Theta(\eta).
+\]
+
+There are two equivalent bookkeeping conventions:
+\begin{enumerate}
+    \item store the weights on a scaled Stiefel manifold with radius
+    $r = \sqrt{\fanout/\fanin}$;
+    \item keep unit-Stiefel weights but multiply the tangent update by
+    $\sqrt{\fanout/\fanin}$.
+\end{enumerate}
+The first convention fixes the weight scale. The second fixes the update scale.
+When both conventions appear in an implementation, their roles should be made
+explicit so the scaling is not accidentally double-counted or omitted.
+
+\section{Relationship to Current Experiments}
+
+The current empirical observation is that no-scale Manifold Muon can show
+strong hyperparameter transfer on MLPs. The most conservative explanation is:
+\[
+    \text{Stiefel weights}
+    +
+    \text{unit-spectral tangents}
+    +
+    \text{retraction}
+    \quad
+    \Rightarrow
+    \quad
+    \text{stable spectral geometry.}
+\]
+For square hidden layers, this is the same geometry required by the spectral
+feature-learning condition. For rectangular row-Stiefel layers, it may be an
+average-case substitute that keeps typical batch RMS changes stable.
+
+This leads to two separate claims:
+\begin{description}
+    \item[No-scale MLP Manifold Muon.]
+    A simple geometry-stabilized optimizer. It can transfer well because square
+    hidden layers already satisfy the spectral rule and rectangular
+    row-Stiefel layers can preserve typical RMS behavior.
+
+    \item[Feature-learning MLP Manifold Muon.]
+    A scaled-Stiefel or RMS-to-RMS-normalized variant. This is the clean
+    worst-case operator-norm construction aligned with the spectral
+    feature-learning theory.
+\end{description}
+
+\section{What to Measure Next}
+
+To distinguish the exact spectral story from the average-case Stiefel story,
+measure the following per layer during width and aspect-ratio sweeps:
+\begin{itemize}
+    \item $\|W\|_2$;
+    \item $\|\Delta W\|_2$;
+    \item $\sqrt{\fanin/\fanout}\|W\|_2$;
+    \item $\sqrt{\fanin/\fanout}\|\Delta W\|_2$;
+    \item $\rms(Wx) / \rms(x)$ on real minibatches;
+    \item $\rms(\Delta W x) / \rms(x)$ on real minibatches;
+    \item tangent residual $\|W^\top A + A^\top W\|$;
+    \item Stiefel residual after retraction.
+\end{itemize}
+
+The decisive test is to vary aspect ratio, not only width. A useful MLP sweep
+should include:
+\begin{itemize}
+    \item square hidden layers $H \times H$;
+    \item expanding layers $4H \times H$;
+    \item contracting layers $H \times 4H$;
+    \item fixed-input layers $H \times d_{\mathrm{in}}$.
+\end{itemize}
+
+If no-scale Manifold Muon transfers only in square or row-Stiefel regimes, the
+mechanism is likely spectral/Stiefel geometry plus average-case RMS
+preservation. If it transfers across changing aspect ratios while the
+RMS-to-RMS operator norm is unstable, then measured batch geometry may be more
+relevant than worst-case operator norm for these MLP experiments.
+
+\section{References}
+
+\begin{itemize}
+    \item \href{https://arxiv.org/abs/2310.17813}{A Spectral Condition for Feature Learning}.
+    \item \href{https://arxiv.org/abs/2405.14813}{Scalable Optimization in the Modular Norm}.
+    \item \href{https://thinkingmachines.ai/blog/modular-manifolds/}{Manifold Muon derivation}.
+\end{itemize}
+
+\end{document}

@@ -18,6 +18,7 @@ class Linear(Atom):
         super().__init__()
         self.fanin  = fanin
         self.fanout = fanout
+        self.stiefel_radius = 1.0
         self.smooth = True
         self.mass = 1
         self.sensitivity = 1
@@ -73,6 +74,81 @@ class Linear(Atom):
         grad = grad_w[0]
         transpose = weight.shape[0] < weight.shape[1]
         weight_t = weight.T if transpose else weight
+        grad_t = grad.T if transpose else grad
+
+        if not state:
+            lam, vel = self.init_dual_state(w)[0]
+        else:
+            lam, vel = state[0]
+
+        alpha = jnp.asarray(alpha, dtype=weight.dtype)
+        beta = jnp.asarray(beta, dtype=weight.dtype)
+        tangent_t, lam_next, vel_next = online_dual_ascent_step(weight_t, grad_t, lam, vel, alpha=alpha, beta=beta)
+        tangent = tangent_t.T if transpose else tangent_t
+        return [tangent], [(lam_next, vel_next)]
+
+
+class StandardParamLinear(Linear):
+    """Linear layer with standard parametrization initialization."""
+
+    def initialize(self, key):
+        scale = jnp.asarray(self.fanin, dtype=jnp.float32) ** -0.5
+        weight = scale * jax.random.normal(key, shape=(self.fanout, self.fanin))
+        return [weight]
+
+    def project(self, w):
+        return [w[0]]
+
+    def retract(self, w):
+        return [w[0]]
+
+
+class RMSRadiusLinear(Linear):
+    """Linear layer whose stored Stiefel radius gives unit RMS-to-RMS norm."""
+
+    def __init__(self, fanout, fanin):
+        super().__init__(fanout, fanin)
+        self.stiefel_radius = float((fanout / fanin) ** 0.5)
+
+    def _radius(self, dtype):
+        return jnp.asarray(self.stiefel_radius, dtype=dtype)
+
+    def initialize(self, key):
+        weight = jax.random.normal(key, shape=(self.fanout, self.fanin))
+        weight = orthogonalize(weight)
+        return [self._radius(weight.dtype) * weight]
+
+    def project(self, w):
+        weight = w[0]
+        weight = orthogonalize(weight)
+        return [self._radius(weight.dtype) * weight]
+
+    def retract(self, w):
+        weight = w[0]
+        weight = matrix_sign(weight)
+        return [self._radius(weight.dtype) * weight]
+
+    def dual_ascent(self, w, grad_w, target_norm=1.0):
+        weight = w[0]
+        grad = grad_w[0]
+        unit_weight = weight / self._radius(weight.dtype)
+        tangent = dual_ascent_tangent(unit_weight, grad, alpha=0.01, steps=100, tol=1e-6)
+        return [tangent]
+
+    def admm_dual_ascent(self, w, grad_w, *, target_norm=1.0, steps=10, rho=4.0):
+        weight = w[0]
+        grad = grad_w[0]
+        unit_weight = weight / self._radius(weight.dtype)
+        tangent = admm_dual_ascent_tangent(unit_weight, grad, steps=steps, rho=rho)
+        return [tangent]
+
+    def online_dual_ascent(self, state, w, grad_w, *, target_norm=1.0, alpha=1e-2, beta=0.9):
+        weight = w[0]
+        grad = grad_w[0]
+        radius = self._radius(weight.dtype)
+        unit_weight = weight / radius
+        transpose = unit_weight.shape[0] < unit_weight.shape[1]
+        weight_t = unit_weight.T if transpose else unit_weight
         grad_t = grad.T if transpose else grad
 
         if not state:

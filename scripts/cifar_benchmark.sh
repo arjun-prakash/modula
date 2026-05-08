@@ -22,3 +22,4 @@ module load python
 # CIFAR-10 default runs
 # uv run benchmark/cifar10.py --steps 5000 --learning-rates 1e-3 --methods adam --use-wandb --wandb-project cifar10-benchmark
 # uv run benchmark/cifar10.py --steps 5000 --learning-rates 1e-3 --methods manifold manifold_online manifold_admm --use-wandb --wandb-project cifar10-benchmark
+

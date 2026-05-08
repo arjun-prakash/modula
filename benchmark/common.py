@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from examples.data.cifar10 import load_cifar10
 from examples.data.cifar100 import load_cifar100
-from modula.atom import Conv2D, Linear
+from modula.atom import Conv2D, Linear, RMSRadiusLinear, StandardParamLinear
 from modula.bond import Flatten, MaxPool2D, ReLU
 from modula.manifold import matrix_sign
 
@@ -23,11 +23,19 @@ MANIFOLD_METHODS = ("manifold", "manifold_online", "manifold_admm")
 METHOD_CHOICES = (
     "adam",
     "adamw",
+    "sgd",
     "muon",
     *MANIFOLD_METHODS,
 )
 MUON_SCALING_CHOICES = ("fan_ratio", "fan_max", "none")
 LOSS_CHOICES = ("cross_entropy", "mse")
+LINEAR_NORMALIZATION_CHOICES = (
+    "unit_stiefel",
+    "unit_stiefel_none",
+    "unit_stiefel_fan_ratio",
+    "rms_radius",
+    "sp",
+)
 FEATURE_DIM = 4 * 4 * 128
 MLP_FEATURE_DIM = 64
 
@@ -290,25 +298,43 @@ def build_classifier_head(num_classes: int):
     return head
 
 
-def build_mlp_trunk(hidden_size: int = MLP_FEATURE_DIM):
-    trunk = ReLU() @ Linear(hidden_size, hidden_size)
-    trunk @= ReLU() @ Linear(hidden_size, 32 * 32 * 3)
+def _linear_atom_for_normalization(linear_normalization: str):
+    if linear_normalization == "sp":
+        return StandardParamLinear
+    if linear_normalization == "rms_radius":
+        return RMSRadiusLinear
+    if linear_normalization in ("unit_stiefel", "unit_stiefel_none", "unit_stiefel_fan_ratio"):
+        return Linear
+    raise ValueError(f"Unknown linear normalization: {linear_normalization}")
+
+
+def build_mlp_trunk(hidden_size: int = MLP_FEATURE_DIM, *, linear_normalization: str = "unit_stiefel"):
+    linear_cls = _linear_atom_for_normalization(linear_normalization)
+    trunk = ReLU() @ linear_cls(hidden_size, hidden_size)
+    trunk @= ReLU() @ linear_cls(hidden_size, 32 * 32 * 3)
     trunk @= Flatten()
     trunk.jit()
     return trunk
 
 
-def build_wide3_mlp_trunk(hidden_size: int = MLP_FEATURE_DIM):
-    trunk = ReLU() @ Linear(4 * hidden_size, hidden_size)
-    trunk @= ReLU() @ Linear(hidden_size, 4 * hidden_size)
-    trunk @= ReLU() @ Linear(4 * hidden_size, 32 * 32 * 3)
+def build_wide3_mlp_trunk(hidden_size: int = MLP_FEATURE_DIM, *, linear_normalization: str = "unit_stiefel"):
+    linear_cls = _linear_atom_for_normalization(linear_normalization)
+    trunk = ReLU() @ linear_cls(4 * hidden_size, hidden_size)
+    trunk @= ReLU() @ linear_cls(hidden_size, 4 * hidden_size)
+    trunk @= ReLU() @ linear_cls(4 * hidden_size, 32 * 32 * 3)
     trunk @= Flatten()
     trunk.jit()
     return trunk
 
 
-def build_mlp_classifier_head(num_classes: int, feature_dim: int = MLP_FEATURE_DIM):
-    head = Linear(num_classes, feature_dim)
+def build_mlp_classifier_head(
+    num_classes: int,
+    feature_dim: int = MLP_FEATURE_DIM,
+    *,
+    linear_normalization: str = "unit_stiefel",
+):
+    linear_cls = _linear_atom_for_normalization(linear_normalization)
+    head = linear_cls(num_classes, feature_dim)
     head.jit()
     return head
 
@@ -317,11 +343,32 @@ def build_cifar_models(num_classes: int):
     return build_cifar_trunk(), build_classifier_head(num_classes)
 
 
-def build_cifar_mlp_models(num_classes: int, hidden_size: int = MLP_FEATURE_DIM, trunk: str = "default"):
+def build_cifar_mlp_models(
+    num_classes: int,
+    hidden_size: int = MLP_FEATURE_DIM,
+    trunk: str = "default",
+    *,
+    linear_normalization: str = "unit_stiefel",
+):
+    head_linear_normalization = "sp" if linear_normalization == "sp" else "unit_stiefel"
     if trunk == "default":
-        return build_mlp_trunk(hidden_size), build_mlp_classifier_head(num_classes, hidden_size)
+        return build_mlp_trunk(
+            hidden_size,
+            linear_normalization=linear_normalization,
+        ), build_mlp_classifier_head(
+            num_classes,
+            hidden_size,
+            linear_normalization=head_linear_normalization,
+        )
     if trunk == "wide3":
-        return build_wide3_mlp_trunk(hidden_size), build_mlp_classifier_head(num_classes, 4 * hidden_size)
+        return build_wide3_mlp_trunk(
+            hidden_size,
+            linear_normalization=linear_normalization,
+        ), build_mlp_classifier_head(
+            num_classes,
+            4 * hidden_size,
+            linear_normalization=head_linear_normalization,
+        )
     raise ValueError(f"Unknown CIFAR MLP trunk: {trunk}")
 
 
@@ -434,8 +481,19 @@ def _weight_to_stiefel_matrix(atom, weight):
 
 def _stiefel_target_scale(atom):
     if isinstance(atom, (Conv2D, Linear)):
-        return jnp.asarray(1.0, dtype=jnp.float32)
+        radius = float(getattr(atom, "stiefel_radius", 1.0))
+        return jnp.asarray(radius, dtype=jnp.float32)
     return None
+
+
+def _linear_rms_to_rms_norm(atom, matrix) -> float | None:
+    if not isinstance(atom, Linear):
+        return None
+
+    array = jnp.asarray(matrix, dtype=jnp.float32)
+    spectral_norm = jnp.linalg.norm(array, ord=2)
+    scale = jnp.sqrt(jnp.asarray(atom.fanin / atom.fanout, dtype=array.dtype))
+    return float(scale * spectral_norm)
 
 
 def stiefel_deviation(atom, weight) -> float | None:
@@ -458,9 +516,10 @@ def stiefel_deviation(atom, weight) -> float | None:
     return float(jnp.linalg.norm(residual) / denom)
 
 
-def compute_trunk_stiefel_metrics(trunk, trunk_weights) -> Dict[str, float]:
+def compute_trunk_geometry_metrics(trunk, trunk_weights) -> Dict[str, float]:
     atoms = _iter_weighted_atoms(trunk)
     deviations: List[float] = []
+    rms_deviations: List[float] = []
     metrics: Dict[str, float] = {}
 
     for layer_idx, (atom, weight) in enumerate(zip(atoms, trunk_weights)):
@@ -470,6 +529,13 @@ def compute_trunk_stiefel_metrics(trunk, trunk_weights) -> Dict[str, float]:
         deviations.append(deviation)
         metrics[f"trunk_stiefel_deviation_layer_{layer_idx}"] = float(deviation)
 
+        rms_norm = _linear_rms_to_rms_norm(atom, weight)
+        if rms_norm is not None:
+            rms_deviation = abs(rms_norm - 1.0)
+            rms_deviations.append(rms_deviation)
+            metrics[f"trunk_rms_to_rms_norm_layer_{layer_idx}"] = float(rms_norm)
+            metrics[f"trunk_rms_to_rms_deviation_layer_{layer_idx}"] = float(rms_deviation)
+
     if deviations:
         metrics["trunk_stiefel_deviation_mean"] = float(np.mean(deviations))
         metrics["trunk_stiefel_deviation_max"] = float(np.max(deviations))
@@ -477,7 +543,18 @@ def compute_trunk_stiefel_metrics(trunk, trunk_weights) -> Dict[str, float]:
         metrics["trunk_stiefel_deviation_mean"] = 0.0
         metrics["trunk_stiefel_deviation_max"] = 0.0
 
+    if rms_deviations:
+        metrics["trunk_rms_to_rms_deviation_mean"] = float(np.mean(rms_deviations))
+        metrics["trunk_rms_to_rms_deviation_max"] = float(np.max(rms_deviations))
+    else:
+        metrics["trunk_rms_to_rms_deviation_mean"] = 0.0
+        metrics["trunk_rms_to_rms_deviation_max"] = 0.0
+
     return metrics
+
+
+def compute_trunk_stiefel_metrics(trunk, trunk_weights) -> Dict[str, float]:
+    return compute_trunk_geometry_metrics(trunk, trunk_weights)
 
 
 def compute_accuracy(predict_fn, trunk_weights, head_weights, inputs, labels, *, batch_size: int = 1024) -> float:
@@ -537,6 +614,7 @@ def train_single_run(
     loss: str = "cross_entropy",
     logger=None,
     show_progress: bool = True,
+    project_trunk_after_update: bool = False,
 ):
     key = jax.random.PRNGKey(seed)
     key, trunk_key, head_key = jax.random.split(key, 3)
@@ -547,7 +625,9 @@ def train_single_run(
     loss_fn = _resolve_loss_fn(loss)
     loss_and_grad = jax.jit(jax.value_and_grad(lambda tw, hw, x, y: loss_fn(predict_fn, tw, hw, x, y), argnums=(0, 1)))
 
-    if method == "adamw":
+    if method == "sgd":
+        head_optimizer = optax.sgd(learning_rate)
+    elif method == "adamw":
         head_optimizer = optax.adamw(learning_rate, weight_decay=adam_weight_decay)
     else:
         head_optimizer = optax.adam(learning_rate)
@@ -560,6 +640,9 @@ def train_single_run(
         trunk_opt_state = trunk_optimizer.init(trunk_weights)
     elif method == "adamw":
         trunk_optimizer = optax.adamw(learning_rate, weight_decay=adam_weight_decay)
+        trunk_opt_state = trunk_optimizer.init(trunk_weights)
+    elif method == "sgd":
+        trunk_optimizer = optax.sgd(learning_rate)
         trunk_opt_state = trunk_optimizer.init(trunk_weights)
 
     dual_state = trunk.init_dual_state(trunk_weights) if method == "manifold_online" else None
@@ -578,7 +661,7 @@ def train_single_run(
         head_updates, head_opt_state = head_optimizer.update(head_grads, head_opt_state, params=head_weights)
         head_weights = optax.apply_updates(head_weights, head_updates)
 
-        if method in ("adam", "adamw"):
+        if method in ("adam", "adamw", "sgd"):
             trunk_updates, trunk_opt_state = trunk_optimizer.update(trunk_grads, trunk_opt_state, params=trunk_weights)
             trunk_update_norm = tree_l2_norm(trunk_updates)
             trunk_weights = optax.apply_updates(trunk_weights, trunk_updates)
@@ -636,9 +719,11 @@ def train_single_run(
             trunk_weights = [
                 weight - learning_rate * update for weight, update in zip(trunk_weights, trunk_updates)
             ]
-            trunk_weights = trunk.retract(trunk_weights)
         else:
             raise ValueError(f"Unknown method: {method}")
+
+        if method in MANIFOLD_METHODS or project_trunk_after_update:
+            trunk_weights = trunk.retract(trunk_weights)
 
         head_grad_norm = tree_l2_norm(head_grads)
         head_update_norm = tree_l2_norm(head_updates)
@@ -669,7 +754,7 @@ def train_single_run(
 
             elapsed_time_so_far = time.perf_counter() - start_time
             epoch = (step + 1) * batch_size / max(int(dataset.train_inputs.shape[0]), 1)
-            stiefel_metrics = compute_trunk_stiefel_metrics(trunk, trunk_weights)
+            geometry_metrics = compute_trunk_geometry_metrics(trunk, trunk_weights)
 
             if logger is not None:
                 logger.log(
@@ -685,7 +770,7 @@ def train_single_run(
                         "head_update_norm": float(head_update_norm),
                         "elapsed_time_seconds": float(elapsed_time_so_far),
                         "seconds_per_step_so_far": float(elapsed_time_so_far / max(step + 1, 1)),
-                        **stiefel_metrics,
+                        **geometry_metrics,
                     }
                 )
 
@@ -710,7 +795,7 @@ def train_single_run(
         dataset.test_labels,
     )
 
-    final_stiefel_metrics = compute_trunk_stiefel_metrics(trunk, trunk_weights)
+    final_geometry_metrics = compute_trunk_geometry_metrics(trunk, trunk_weights)
     result = {
         "train_accuracy": float(final_train_accuracy),
         "test_accuracy": float(final_test_accuracy),
@@ -719,7 +804,7 @@ def train_single_run(
         "final_epoch": float(final_epoch),
         "training_time_seconds": float(elapsed_time),
         "seconds_per_step": float(elapsed_time / max(steps, 1)),
-        **final_stiefel_metrics,
+        **final_geometry_metrics,
     }
 
     if logger is not None:
@@ -767,6 +852,8 @@ def make_run_config(
         config["hidden_size"] = int(hidden_size)
     if hasattr(args, "trunk"):
         config["trunk"] = str(args.trunk)
+    if hasattr(args, "linear_normalizations"):
+        config["linear_normalizations"] = list(args.linear_normalizations)
     return config
 
 
@@ -801,7 +888,51 @@ def make_results_config(args, *, dataset_name: str, num_classes: int) -> Dict[st
         config["hidden_sizes"] = [int(hidden_size) for hidden_size in args.hidden_sizes]
     if hasattr(args, "trunk"):
         config["trunk"] = str(args.trunk)
+    if hasattr(args, "linear_normalizations"):
+        config["linear_normalizations"] = list(args.linear_normalizations)
     return config
+
+
+def summarize_lr_transfer(runs: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[int, List[Mapping[str, Any]]]] = {}
+    for run in runs:
+        if "hidden_size" not in run or "linear_normalization" not in run or "learning_rate" not in run:
+            continue
+        variant = str(run["linear_normalization"])
+        hidden_size = int(run["hidden_size"])
+        grouped.setdefault(variant, {}).setdefault(hidden_size, []).append(run)
+
+    summary: Dict[str, Any] = {}
+    for variant, by_hidden in grouped.items():
+        best_lr_by_hidden: Dict[str, float] = {}
+        best_accuracy_by_hidden: Dict[str, float] = {}
+        accuracy_by_hidden_lr: Dict[str, Dict[str, float]] = {}
+
+        for hidden_size, hidden_runs in sorted(by_hidden.items()):
+            best = max(hidden_runs, key=lambda run: float(run.get("test_accuracy", float("-inf"))))
+            hidden_key = str(hidden_size)
+            best_lr_by_hidden[hidden_key] = float(best["learning_rate"])
+            best_accuracy_by_hidden[hidden_key] = float(best["test_accuracy"])
+            accuracy_by_hidden_lr[hidden_key] = {
+                f"{float(run['learning_rate']):.12g}": float(run["test_accuracy"])
+                for run in sorted(hidden_runs, key=lambda run: float(run["learning_rate"]))
+            }
+
+        best_lrs = [rate for rate in best_lr_by_hidden.values() if rate > 0.0]
+        if len(best_lrs) > 1:
+            lr_logs = np.log10(np.asarray(best_lrs, dtype=np.float64))
+            lr_spread = float(np.max(lr_logs) - np.min(lr_logs))
+        else:
+            lr_spread = 0.0
+
+        summary[variant] = {
+            "best_lr_by_hidden_size": best_lr_by_hidden,
+            "best_test_accuracy_by_hidden_size": best_accuracy_by_hidden,
+            "test_accuracy_by_hidden_size_and_lr": accuracy_by_hidden_lr,
+            "best_lr_log10_spread": lr_spread,
+        }
+
+    return summary
 
 
 def save_results(
@@ -818,6 +949,9 @@ def save_results(
         payload["methods"][method] = {
             "runs": [dict(run) for run in runs],
         }
+        transfer_summary = summarize_lr_transfer(runs)
+        if transfer_summary:
+            payload["methods"][method]["lr_transfer"] = transfer_summary
         if method in best_runs:
             payload["methods"][method]["best"] = dict(best_runs[method])
 
@@ -850,9 +984,70 @@ def plot_best_accuracy_vs_runtime(best_runs: Mapping[str, Mapping[str, Any]], pl
     plt.close(fig)
 
 
+def _plot_safe_name(value: str) -> str:
+    return "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in value)
+
+
+def plot_cifar_mlp_lr_transfer(results: Mapping[str, Sequence[Mapping[str, Any]]], plots_dir: Path) -> None:
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    for method, runs in results.items():
+        grouped: Dict[str, Dict[int, List[Mapping[str, Any]]]] = {}
+        for run in runs:
+            if "hidden_size" not in run or "linear_normalization" not in run:
+                continue
+            grouped.setdefault(str(run["linear_normalization"]), {}).setdefault(int(run["hidden_size"]), []).append(run)
+
+        for variant, by_hidden in grouped.items():
+            if not by_hidden:
+                continue
+
+            fig, ax = plt.subplots(figsize=(7, 5))
+            for hidden_size, hidden_runs in sorted(by_hidden.items()):
+                sorted_runs = sorted(hidden_runs, key=lambda run: float(run["learning_rate"]))
+                rates = [float(run["learning_rate"]) for run in sorted_runs]
+                accuracies = [float(run["test_accuracy"]) for run in sorted_runs]
+                ax.plot(rates, accuracies, marker="o", label=f"h={hidden_size}")
+
+            ax.set_xscale("log")
+            ax.set_xlabel("Learning rate")
+            ax.set_ylabel("Test accuracy (%)")
+            ax.set_title(f"{method} {variant}: accuracy vs LR")
+            ax.grid(True, linestyle="--", alpha=0.3)
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(
+                plots_dir / f"cifar10_mlp_{_plot_safe_name(method)}_{_plot_safe_name(variant)}_accuracy_vs_lr.png",
+                dpi=300,
+            )
+            plt.close(fig)
+
+        if grouped:
+            fig, ax = plt.subplots(figsize=(7, 5))
+            for variant, by_hidden in sorted(grouped.items()):
+                hidden_sizes: List[int] = []
+                best_lrs: List[float] = []
+                for hidden_size, hidden_runs in sorted(by_hidden.items()):
+                    best = max(hidden_runs, key=lambda run: float(run["test_accuracy"]))
+                    hidden_sizes.append(hidden_size)
+                    best_lrs.append(float(best["learning_rate"]))
+                ax.plot(hidden_sizes, best_lrs, marker="o", label=variant)
+
+            ax.set_yscale("log")
+            ax.set_xlabel("Hidden size")
+            ax.set_ylabel("Best learning rate")
+            ax.set_title(f"{method}: best LR by hidden size")
+            ax.grid(True, linestyle="--", alpha=0.3)
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(plots_dir / f"cifar10_mlp_{_plot_safe_name(method)}_best_lr_by_hidden_size.png", dpi=300)
+            plt.close(fig)
+
+
 def print_run_summary(method: str, run_result: Mapping[str, Any]) -> None:
+    variant = f" {run_result['linear_normalization']}" if "linear_normalization" in run_result else ""
     print(
-        f"[{method}] lr={run_result['learning_rate']:.3g}: "
+        f"[{method}{variant}] lr={run_result['learning_rate']:.3g}: "
         f"train acc={run_result['train_accuracy']:.2f}% | "
         f"test acc={run_result['test_accuracy']:.2f}% | "
         f"loss={run_result['final_loss']:.4f} | "
