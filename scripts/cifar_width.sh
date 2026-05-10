@@ -1,37 +1,60 @@
 #!/bin/bash
 
-#SBATCH --output=slurm_logs/wandb_%j.out # Standard output log
+#SBATCH --output=slurm_logs/wandb_%j.out
 #SBATCH -N 1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=24:00:00
 #SBATCH --mem=64GB
-#SBATCH -p gpu --gres=gpu:1 
+#SBATCH -p gpu --gres=gpu:1
 #SBATCH --constraint=geforce3090
 
-# Load Python module
-
 module load python
-#export PYTHONPATH=$(pwd):$PYTHONPATH
 
-# CIFAR-10 MLP runs
-# uv run benchmark/cifar10_mlp.py --steps 10000 --learning-rates 1e-5 5e-5 1e-4 5e-4 1e-3 5e-3 1e-2 5e-2 1e-1 5e-1 --hidden-sizes 256 512 1024 2048 --methods adam --use-wandb --wandb-project cifar10-width-sweep --wandb-group "Adam baseline"
-# uv run benchmark/cifar10_mlp.py --steps 10000 --learning-rates 1e-5 5e-5 1e-4 5e-4 1e-3 5e-3 1e-2 5e-2 1e-1 5e-1 --hidden-sizes 256 512 1024 2048 --methods manifold_online --manifold-scaling fan_ratio --use-wandb --wandb-project cifar10-width-sweep --wandb-group "Manifold Online scale factor"
+LRS="6.1e-5 1.22e-4 2.44e-4 4.88e-4 9.76e-4 1.95e-3 3.9e-3 7.81e-3 1.56e-2 3.12e-2 6.25e-2 1.25e-1 2.5e-1 5e-1 1"
 
-# uv run benchmark/cifar10_mlp.py --steps 10000 --learning-rates 1e-5 5e-5 1e-4 5e-4 1e-3 5e-3 1e-2 5e-2 1e-1 5e-1 --hidden-sizes 256 512 1024 2048 --methods manifold_online --manifold-scaling fan_max --use-wandb --wandb-project cifar10-width-sweep --wandb-group "Manifold Online max factor"
-# uv run benchmark/cifar10_mlp.py --steps 10000 --learning-rates 1e-5 5e-5 1e-4 5e-4 1e-3 5e-3 1e-2 5e-2 1e-1 5e-1 --hidden-sizes 256 512 1024 2048 --methods manifold_online --manifold-scaling none --use-wandb --wandb-project cifar10-width-sweep --wandb-group "Manifold Online no factor"
+LRS_EDIT="4.88e-4 9.76e-4 1.95e-3 3.9e-3 7.81e-3 1.56e-2 3.12e-2 6.25e-2 1.25e-1 2.5e-1 5e-1"
+WIDTHS="256 512 1024 2048"
 
-# uv run benchmark/cifar10_mlp.py --steps 10000 --learning-rates 1e-5 5e-5 1e-4 5e-4 1e-3 5e-3 1e-2 5e-2 1e-1 5e-1 --hidden-sizes 256 512 1024 --methods manifold_online --manifold-scaling fan_ratio --trunk wide3 --linear-normalizations rms_radius --use-wandb --wandb-project cifar10-width-sweep --wandb-group "Manifold Online scale factor non-square"
-# uv run benchmark/cifar10_mlp.py --steps 10000 --learning-rates 1e-5 5e-5 1e-4 5e-4 1e-3 5e-3 1e-2 5e-2 1e-1 5e-1 --hidden-sizes 256 512 1024 --methods manifold_online --manifold-scaling fan_max --trunk wide3 --use-wandb --wandb-project cifar10-width-sweep --wandb-group "Manifold Online max factor non-square"
-# uv run benchmark/cifar10_mlp.py --steps 10000 --learning-rates 1e-5 5e-5 1e-4 5e-4 1e-3 5e-3 1e-2 5e-2 1e-1 5e-1 --hidden-sizes 256 512 1024 --methods manifold_online --manifold-scaling none --trunk wide3 --use-wandb --wandb-project cifar10-width-sweep --wandb-group "Manifold Online max factor non-square"
+# this is -7.75, -7.5, -7.25, -7.0, -6.75, -6.5, -6.25 on log2 scale
+LRS_PRECISE="0.00464534 0.00552427 0.00656864 0.0078125 0.00929068 0.01104854 0.01313901"
 
-# uv run benchmark/cifar10_mlp.py --steps 10000 --learning-rates 1e-5 5e-5 1e-4 5e-4 1e-3 5e-3 1e-2 5e-2 1e-1 5e-1 --hidden-sizes 256 512 1024 --methods adam --trunk wide3 --use-wandb --wandb-project cifar10-width-sweep --wandb-group "Adam baseline non-square"
 
-uv run benchmark/cifar10_mlp.py --steps 10000 \
-  --learning-rates 6.1e-5 1.22e-4 2.44e-4 4.88e-4 9.76e-4 1.95e-3 3.9e-3 7.81e-3 1.56e-2 3.12e-2 6.25e-2\
-  --hidden-sizes 256 512 1024 2048 \
-  --methods sgd \
-  --linear-normalizations sp \
+# uv run benchmark/cifar10_mlp_sp.py \
+#   --epochs 20 \
+#   --learning-rates $LRS_PRECISE \
+#   --hidden-sizes 8192 \
+#   --methods sgd \
+#   --use-wandb \
+#   --wandb-project cifar10-width-sweep-final \
+#   --wandb-group "SP SGD - newtest2"
+
+  uv run benchmark/cifar10_mlp_sp.py \
+  --epochs 20 \
+  --learning-rates $LRS_EDIT \
+  --hidden-sizes 256 2048 \
+  --methods adam \
   --use-wandb \
-  --wandb-project cifar10-width-sweep \
-  --wandb-group "SGD baseline new lr"
+  --wandb-project cifar10-width-sweep-final \
+  --wandb-group "SP Adam Test"
+
+# uv run benchmark/cifar10_mlp_mup.py \
+#   --epochs 20 \
+#   --learning-rates $LRS_EDIT \
+#   --hidden-sizes 512 1024 \
+#   --methods manifold_online \
+#   --manifold-scaling fan_ratio \
+#   --linear-normalizations rms_radius \
+#   --use-wandb \
+#   --wandb-project cifar10-width-sweep-final \
+#   --wandb-group "muP width test2"
+
+# uv run benchmark/cifar10_mlp_sp.py \
+#   --epochs 20 \
+#   --learning-rates $LRS_EDIT \
+#   --hidden-sizes $WIDTHS \
+#   --methods manifold_online \
+#   --manifold-scaling none \
+#   --use-wandb \
+#   --wandb-project cifar10-width-sweep-final \
+#   --wandb-group "SP Manifold width sweep"

@@ -2,18 +2,20 @@ import json
 import math
 import tempfile
 import unittest
+import importlib.util
+import contextlib
+import io
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import optax
 
 from benchmark import common as benchmark_common
-from benchmark import cifar10 as cifar10_benchmark
-from benchmark import cifar10_mlp as cifar10_mlp_benchmark
-from benchmark import cifar100 as cifar100_benchmark
-from benchmark import gpt as gpt_benchmark
+from benchmark import cifar10_mlp_mup as cifar10_mlp_benchmark
+from benchmark import cifar10_mlp_sp as cifar10_mlp_sp_benchmark
 from benchmark.run_logging import NoOpLogger, create_run_logger
-from modula.atom import Linear, RMSRadiusLinear
+from modula.atom import Linear, RMSRadiusLinear, StandardParamLinear
 
 
 class BenchmarkSmokeTest(unittest.TestCase):
@@ -30,7 +32,9 @@ class BenchmarkSmokeTest(unittest.TestCase):
         logger.finish()
 
     def test_cifar_manifold_scaling_has_no_target_norm_allocator(self):
-        trunk, _ = benchmark_common.build_cifar_mlp_models(10, hidden_size=16)
+        from benchmark import mup as benchmark_mup
+
+        trunk, _ = benchmark_mup.build_cifar_mlp_models(10, hidden_size=16)
         weights = trunk.initialize(jax.random.PRNGKey(0))
         tangents = [jnp.ones_like(weight) for weight in weights]
 
@@ -44,11 +48,27 @@ class BenchmarkSmokeTest(unittest.TestCase):
             expected = math.sqrt(atom.fanout / atom.fanin)
             self.assertTrue(bool(jnp.allclose(direction, expected * tangent)))
 
-    def test_gpt_manifold_scaling_has_no_selected_atom_divisor(self):
+    def test_benchmark_parameterization_modules_exist(self):
+        self.assertIsNotNone(importlib.util.find_spec("benchmark.sp"))
+        self.assertIsNotNone(importlib.util.find_spec("benchmark.mup"))
+        self.assertIsNotNone(importlib.util.find_spec("benchmark.scaling"))
+
+    def test_shared_scaling_has_no_selected_atom_divisor(self):
+        from benchmark import scaling as benchmark_scaling
+
         atom = Linear(16, 64)
-        self.assertEqual(gpt_benchmark.manifold_update_scale(atom, scaling="none"), 1.0)
-        self.assertEqual(gpt_benchmark.manifold_update_scale(atom, scaling="fan_ratio"), 0.5)
-        self.assertEqual(gpt_benchmark.manifold_update_scale(atom, scaling="fan_max"), 8.0)
+        self.assertEqual(benchmark_scaling.manifold_update_scale(atom, scaling="none"), 1.0)
+        self.assertEqual(benchmark_scaling.manifold_update_scale(atom, scaling="fan_ratio"), 0.5)
+        self.assertEqual(benchmark_scaling.manifold_update_scale(atom, scaling="fan_max"), 8.0)
+
+    def test_cifar_normalization_matches_torchvision_centering(self):
+        images = jnp.asarray([0.0, 0.5, 1.0], dtype=jnp.float32)
+
+        centered = benchmark_common.normalize_cifar_images(images, normalization="minus_one_one")
+        zero_one = benchmark_common.normalize_cifar_images(images, normalization="zero_one")
+
+        self.assertTrue(bool(jnp.allclose(centered, jnp.asarray([-1.0, 0.0, 1.0], dtype=jnp.float32))))
+        self.assertTrue(bool(jnp.allclose(zero_one, images)))
 
     def test_rms_radius_linear_geometry(self):
         atom = RMSRadiusLinear(16, 64)
@@ -65,21 +85,26 @@ class BenchmarkSmokeTest(unittest.TestCase):
             self.assertTrue(math.isclose(rms_norm, 1.0, rel_tol=2e-2, abs_tol=2e-2))
 
     def test_cifar_mlp_sp_linear_initialization_is_not_stiefel(self):
+        from benchmark import sp as benchmark_sp
+
         hidden_size = 128
-        trunk, head = benchmark_common.build_cifar_mlp_models(
+        trunk, head = benchmark_sp.build_cifar_mlp_models(
             10,
             hidden_size=hidden_size,
-            linear_normalization="sp",
         )
 
         trunk_weights = trunk.initialize(jax.random.PRNGKey(0))
         head_weights = head.initialize(jax.random.PRNGKey(1))
         hidden_weight = trunk_weights[1]
         output_weight = head_weights[0]
+        hidden_atom = benchmark_common._iter_weighted_atoms(trunk)[1]
+        head_atom = benchmark_common._iter_weighted_atoms(head)[0]
 
         self.assertEqual(hidden_weight.shape, (hidden_size, hidden_size))
+        self.assertIsInstance(hidden_atom, StandardParamLinear)
+        self.assertIsInstance(head_atom, StandardParamLinear)
         self.assertGreater(
-            benchmark_common.stiefel_deviation(benchmark_common._iter_weighted_atoms(trunk)[1], hidden_weight),
+            benchmark_common.stiefel_deviation(hidden_atom, hidden_weight),
             0.05,
         )
         self.assertTrue(
@@ -97,111 +122,103 @@ class BenchmarkSmokeTest(unittest.TestCase):
             )
         )
 
-    def test_cifar10_smoke(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            results_path = tmp_path / "cifar10_results.json"
-            plots_dir = tmp_path / "plots"
+    def test_cifar_mlp_sp_manifold_routes_use_original_linear_atoms(self):
+        from benchmark import sp as benchmark_sp
 
-            cifar10_benchmark.main(
-                [
-                    "--smoke-test",
-                    "--synthetic-data",
-                    "--steps",
-                    "2",
-                    "--learning-rates",
-                    "1e-2",
-                    "--methods",
-                    "adam",
-                    "adamw",
-                    "muon",
-                    "manifold",
-                    "manifold_online",
-                    "manifold_admm",
-                    "--results-path",
-                    str(results_path),
-                    "--plots-dir",
-                    str(plots_dir),
-                ]
-            )
+        trunk, head = benchmark_sp.build_cifar_mlp_models(
+            10,
+            hidden_size=16,
+            parameterization="unit_stiefel",
+        )
 
-            self.assertTrue(results_path.exists())
-            self.assertTrue((plots_dir / "cifar10_best_accuracy_vs_runtime.png").exists())
+        trunk_atoms = benchmark_common._iter_weighted_atoms(trunk)
+        head_atoms = benchmark_common._iter_weighted_atoms(head)
+        self.assertIsInstance(trunk_atoms[1], Linear)
+        self.assertNotIsInstance(trunk_atoms[1], StandardParamLinear)
+        self.assertNotIsInstance(trunk_atoms[1], RMSRadiusLinear)
+        self.assertIsInstance(head_atoms[0], Linear)
+        self.assertNotIsInstance(head_atoms[0], StandardParamLinear)
+        self.assertNotIsInstance(head_atoms[0], RMSRadiusLinear)
 
-            payload = json.loads(results_path.read_text())
-            self.assertEqual(payload["dataset"], "cifar10")
-            self.assertEqual(payload["config"]["loss"], "cross_entropy")
-            self.assertEqual(payload["config"]["muon_scaling"], "fan_ratio")
-            self.assertNotIn("target_norm", payload["config"])
-            self.assertIn("muon_weight_decay", payload["config"])
-            self.assertIn("manifold_weight_decay", payload["config"])
-            for method in ("adam", "adamw", "muon", "manifold", "manifold_online", "manifold_admm"):
-                best = payload["methods"][method]["best"]
-                self.assertEqual(best["loss_name"], "cross_entropy")
-                self.assertTrue(math.isfinite(best["train_accuracy"]))
-                self.assertTrue(math.isfinite(best["test_accuracy"]))
-                self.assertTrue(math.isfinite(best["final_loss"]))
-                self.assertGreater(best["final_epoch"], 0.0)
-                self.assertGreater(best["training_time_seconds"], 0.0)
-                self.assertGreater(best["seconds_per_step"], 0.0)
-                self.assertTrue(math.isfinite(best["trunk_stiefel_deviation_mean"]))
-                self.assertTrue(math.isfinite(best["trunk_stiefel_deviation_max"]))
-                self.assertGreaterEqual(best["trunk_stiefel_deviation_mean"], 0.0)
-                self.assertGreaterEqual(best["trunk_stiefel_deviation_max"], 0.0)
+    def test_cifar_mlp_mup_routes_use_manifold_atoms(self):
+        from benchmark import mup as benchmark_mup
 
-    def test_cifar100_smoke(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            results_path = tmp_path / "cifar100_results.json"
-            plots_dir = tmp_path / "plots"
+        unit_trunk, unit_head = benchmark_mup.build_cifar_mlp_models(
+            10,
+            hidden_size=16,
+            parameterization="unit_stiefel",
+        )
+        rms_trunk, rms_head = benchmark_mup.build_cifar_mlp_models(
+            10,
+            hidden_size=16,
+            parameterization="rms_radius",
+        )
 
-            cifar100_benchmark.main(
-                [
-                    "--smoke-test",
-                    "--synthetic-data",
-                    "--steps",
-                    "2",
-                    "--learning-rates",
-                    "5e-3",
-                    "--methods",
-                    "adam",
-                    "adamw",
-                    "muon",
-                    "manifold",
-                    "manifold_online",
-                    "manifold_admm",
-                    "--muon-scaling",
-                    "fan_max",
-                    "--results-path",
-                    str(results_path),
-                    "--plots-dir",
-                    str(plots_dir),
-                ]
-            )
+        self.assertIsInstance(benchmark_common._iter_weighted_atoms(unit_trunk)[1], Linear)
+        self.assertNotIsInstance(benchmark_common._iter_weighted_atoms(unit_trunk)[1], StandardParamLinear)
+        self.assertIsInstance(benchmark_common._iter_weighted_atoms(unit_head)[0], Linear)
+        self.assertIsInstance(benchmark_common._iter_weighted_atoms(rms_trunk)[1], RMSRadiusLinear)
+        self.assertIsInstance(benchmark_common._iter_weighted_atoms(rms_head)[0], Linear)
+        self.assertNotIsInstance(benchmark_common._iter_weighted_atoms(rms_head)[0], RMSRadiusLinear)
 
-            self.assertTrue(results_path.exists())
-            self.assertTrue((plots_dir / "cifar100_best_accuracy_vs_runtime.png").exists())
+    def test_mup_head_scaling_uses_base_width(self):
+        from benchmark import mup as benchmark_mup
 
-            payload = json.loads(results_path.read_text())
-            self.assertEqual(payload["dataset"], "cifar100")
-            self.assertEqual(payload["config"]["loss"], "cross_entropy")
-            self.assertEqual(payload["config"]["muon_scaling"], "fan_max")
-            self.assertNotIn("target_norm", payload["config"])
-            self.assertIn("muon_weight_decay", payload["config"])
-            self.assertIn("manifold_weight_decay", payload["config"])
-            for method in ("adam", "adamw", "muon", "manifold", "manifold_online", "manifold_admm"):
-                best = payload["methods"][method]["best"]
-                self.assertEqual(best["loss_name"], "cross_entropy")
-                self.assertTrue(math.isfinite(best["train_accuracy"]))
-                self.assertTrue(math.isfinite(best["test_accuracy"]))
-                self.assertTrue(math.isfinite(best["final_loss"]))
-                self.assertGreater(best["final_epoch"], 0.0)
-                self.assertGreater(best["training_time_seconds"], 0.0)
-                self.assertGreater(best["seconds_per_step"], 0.0)
-                self.assertTrue(math.isfinite(best["trunk_stiefel_deviation_mean"]))
-                self.assertTrue(math.isfinite(best["trunk_stiefel_deviation_max"]))
-                self.assertGreaterEqual(best["trunk_stiefel_deviation_mean"], 0.0)
-                self.assertGreaterEqual(best["trunk_stiefel_deviation_max"], 0.0)
+        _, head = benchmark_mup.build_cifar_mlp_models(
+            10,
+            hidden_size=512,
+            parameterization="rms_radius",
+        )
+
+        self.assertTrue(math.isclose(benchmark_mup.head_adam_update_scale(head, base_width=256), 0.5))
+        self.assertTrue(math.isclose(benchmark_mup.head_init_scale(head, base_width=256), math.sqrt(0.5)))
+
+    def test_head_adam_update_scale_scales_adam_updates(self):
+        weights = [jnp.array([[1.0, -2.0, 3.0]], dtype=jnp.float32)]
+        grads = [jnp.array([[0.5, -0.25, 0.75]], dtype=jnp.float32)]
+        learning_rate = 0.01
+        update_scale = 0.25
+
+        optimizer = optax.adam(learning_rate)
+        state = optimizer.init(weights)
+        base_updates, _ = optimizer.update(grads, state, params=weights)
+        scaled_updates, _ = benchmark_common._scaled_head_optimizer_update(
+            "adam",
+            optimizer,
+            state,
+            grads,
+            weights,
+            learning_rate=learning_rate,
+            adam_weight_decay=0.0,
+            head_adam_update_scale=update_scale,
+        )
+
+        self.assertTrue(bool(jnp.allclose(scaled_updates[0], update_scale * base_updates[0])))
+
+    def test_head_adam_update_scale_leaves_adamw_decay_unscaled(self):
+        weights = [jnp.array([[1.0, -2.0, 3.0]], dtype=jnp.float32)]
+        grads = [jnp.array([[0.5, -0.25, 0.75]], dtype=jnp.float32)]
+        learning_rate = 0.01
+        weight_decay = 0.2
+        update_scale = 0.25
+
+        optimizer = optax.adam(learning_rate)
+        state = optimizer.init(weights)
+        adam_updates, _ = optimizer.update(grads, state, params=weights)
+        scaled_updates, _ = benchmark_common._scaled_head_optimizer_update(
+            "adamw",
+            optimizer,
+            state,
+            grads,
+            weights,
+            learning_rate=learning_rate,
+            adam_weight_decay=weight_decay,
+            head_adam_update_scale=update_scale,
+        )
+
+        expected_decay_updates = [-learning_rate * weight_decay * weights[0]]
+        expected_updates = [update_scale * adam_updates[0] + expected_decay_updates[0]]
+        self.assertTrue(bool(jnp.allclose(scaled_updates[0], expected_updates[0])))
 
     def test_cifar10_mlp_smoke(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -243,6 +260,10 @@ class BenchmarkSmokeTest(unittest.TestCase):
             payload = json.loads(results_path.read_text())
             self.assertEqual(payload["dataset"], "cifar10_mlp")
             self.assertEqual(payload["config"]["loss"], "cross_entropy")
+            self.assertEqual(payload["config"]["epochs"], None)
+            self.assertEqual(payload["config"]["sgd_momentum"], 0.9)
+            self.assertEqual(payload["config"]["cifar_normalization"], "minus_one_one")
+            self.assertEqual(payload["config"]["mup_base_width"], 256)
             self.assertEqual(payload["config"]["muon_scaling"], "fan_max")
             self.assertEqual(payload["config"]["hidden_sizes"], [16, 32])
             self.assertEqual(payload["config"]["trunk"], "wide3")
@@ -275,6 +296,7 @@ class BenchmarkSmokeTest(unittest.TestCase):
                 self.assertTrue(math.isfinite(best["train_accuracy"]))
                 self.assertTrue(math.isfinite(best["test_accuracy"]))
                 self.assertTrue(math.isfinite(best["final_loss"]))
+                self.assertTrue(math.isfinite(best["full_train_loss"]))
                 self.assertGreater(best["final_epoch"], 0.0)
                 self.assertGreater(best["training_time_seconds"], 0.0)
                 self.assertGreater(best["seconds_per_step"], 0.0)
@@ -283,6 +305,19 @@ class BenchmarkSmokeTest(unittest.TestCase):
                 self.assertGreaterEqual(best["trunk_stiefel_deviation_mean"], 0.0)
                 self.assertGreaterEqual(best["trunk_stiefel_deviation_max"], 0.0)
                 self.assertTrue(math.isfinite(best["trunk_rms_to_rms_deviation_mean"]))
+                self.assertTrue(math.isfinite(best["head_adam_update_scale"]))
+                self.assertTrue(best["head_adam_update_scale"] > 0.0)
+
+            for method in ("adamw", "manifold"):
+                for run in payload["methods"][method]["runs"]:
+                    expected_scale = 256 / (4 * run["hidden_size"])
+                    self.assertTrue(
+                        math.isclose(
+                            run["head_adam_update_scale"],
+                            expected_scale,
+                            rel_tol=1e-12,
+                        )
+                    )
 
     def test_cifar10_mlp_accepts_plain_sgd(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -302,6 +337,8 @@ class BenchmarkSmokeTest(unittest.TestCase):
                     "16",
                     "--methods",
                     "sgd",
+                    "--sgd-momentum",
+                    "0.3",
                     "--linear-normalizations",
                     "unit_stiefel_none",
                     "--results-path",
@@ -313,31 +350,59 @@ class BenchmarkSmokeTest(unittest.TestCase):
 
             payload = json.loads(results_path.read_text())
             self.assertEqual(payload["config"]["methods"], ["sgd"])
+            self.assertEqual(payload["config"]["sgd_momentum"], 0.3)
             self.assertEqual(len(payload["methods"]["sgd"]["runs"]), 1)
             self.assertEqual(payload["methods"]["sgd"]["best"]["linear_normalization"], "unit_stiefel_none")
             self.assertTrue(math.isfinite(payload["methods"]["sgd"]["best"]["final_loss"]))
+            self.assertTrue(math.isfinite(payload["methods"]["sgd"]["best"]["full_train_loss"]))
 
-    def test_gpt_policy_selection(self):
-        self.assertEqual(gpt_benchmark.selected_atom_keys("none", 2), ())
+    def test_cifar10_mlp_epochs_resolve_steps_for_mup_and_sp(self):
+        for benchmark_module, dataset_name in (
+            (cifar10_mlp_benchmark, "cifar10_mlp"),
+            (cifar10_mlp_sp_benchmark, "cifar10_mlp_sp"),
+        ):
+            with self.subTest(dataset=dataset_name), tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                results_path = tmp_path / f"{dataset_name}_results.json"
+                plots_dir = tmp_path / "plots"
+                args = [
+                    "--smoke-test",
+                    "--synthetic-data",
+                    "--epochs",
+                    "0.25",
+                    "--batch-size",
+                    "8",
+                    "--learning-rates",
+                    "1e-2",
+                    "--hidden-sizes",
+                    "16",
+                    "--methods",
+                    "sgd",
+                    "--results-path",
+                    str(results_path),
+                    "--plots-dir",
+                    str(plots_dir),
+                ]
+                if dataset_name == "cifar10_mlp":
+                    args.extend(["--linear-normalizations", "unit_stiefel_none"])
 
-        mlp_names = [name for _, name in gpt_benchmark.selected_atom_keys("mlp_only", 2)]
-        self.assertEqual(mlp_names, ["mlp_up", "mlp_down", "mlp_up", "mlp_down"])
+                benchmark_module.main(args)
 
-        value_out_mlp_names = {
-            name for _, name in gpt_benchmark.selected_atom_keys("attention_value_out_mlp", 1)
-        }
-        self.assertNotIn("q", value_out_mlp_names)
-        self.assertNotIn("k", value_out_mlp_names)
-        self.assertEqual(value_out_mlp_names, {"v", "attn_out", "mlp_up", "mlp_down"})
+                payload = json.loads(results_path.read_text())
+                best = payload["methods"]["sgd"]["best"]
+                self.assertEqual(payload["config"]["epochs"], 0.25)
+                self.assertEqual(payload["config"]["batch_size"], 8)
+                self.assertEqual(payload["config"]["steps"], 2)
+                self.assertEqual(best["steps"], 2)
+                self.assertTrue(math.isclose(best["final_epoch"], 0.25, rel_tol=1e-6))
 
-        all_names = [name for _, name in gpt_benchmark.selected_atom_keys("all_blocks", 1)]
-        self.assertEqual(all_names, list(gpt_benchmark.BLOCK_LAYER_NAMES))
-
-    def test_gpt_smoke(self):
+    def test_cifar10_mlp_sp_smoke(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            results_path = Path(tmpdir) / "gpt_results.json"
+            tmp_path = Path(tmpdir)
+            results_path = tmp_path / "cifar10_mlp_sp_results.json"
+            plots_dir = tmp_path / "plots"
 
-            gpt_benchmark.main(
+            cifar10_mlp_sp_benchmark.main(
                 [
                     "--smoke-test",
                     "--synthetic-data",
@@ -345,65 +410,80 @@ class BenchmarkSmokeTest(unittest.TestCase):
                     "2",
                     "--learning-rates",
                     "1e-2",
+                    "--hidden-sizes",
+                    "16",
                     "--methods",
-                    "adam",
-                    "adamw",
-                    "manifold_online",
-                    "manifold_admm",
-                    "--manifold-scaling",
-                    "fan_max",
-                    "--layer-policies",
-                    "none",
-                    "mlp_only",
+                    "sgd",
                     "--results-path",
                     str(results_path),
+                    "--plots-dir",
+                    str(plots_dir),
                 ]
             )
 
             self.assertTrue(results_path.exists())
-            self.assertFalse((Path("benchmark") / "transformer_manifold_muon_plan.md").exists())
+            self.assertTrue((plots_dir / "cifar10_mlp_sp_best_accuracy_vs_runtime.png").exists())
+
             payload = json.loads(results_path.read_text())
-            self.assertEqual(payload["dataset"], "synthetic_gpt")
-            self.assertNotIn("target_norm", payload["config"])
-            self.assertNotIn("blocks_mass", payload["config"])
-            self.assertEqual(payload["config"]["manifold_scaling"], "fan_max")
-            self.assertIn("manifold_weight_decay", payload["config"])
+            self.assertEqual(payload["dataset"], "cifar10_mlp_sp")
+            self.assertEqual(payload["config"]["methods"], ["sgd"])
+            self.assertEqual(payload["config"]["epochs"], None)
+            self.assertEqual(payload["config"]["sgd_momentum"], 0.9)
+            self.assertEqual(payload["config"]["cifar_normalization"], "minus_one_one")
+            self.assertEqual(payload["config"]["hidden_sizes"], [16])
+            self.assertEqual(payload["methods"]["sgd"]["best"]["parameterization"], "sp")
+            self.assertEqual(payload["methods"]["sgd"]["best"]["linear_normalization"], "sp")
+            self.assertFalse(payload["methods"]["sgd"]["best"]["project_trunk_after_update"])
+            self.assertTrue(math.isfinite(payload["methods"]["sgd"]["best"]["final_loss"]))
+            self.assertTrue(math.isfinite(payload["methods"]["sgd"]["best"]["full_train_loss"]))
 
-            adam_best = payload["methods"]["adam"]["policies"]["none"]["best"]
-            self.assertTrue(math.isfinite(adam_best["train_loss"]))
-            self.assertTrue(math.isfinite(adam_best["val_loss"]))
-            self.assertTrue(math.isfinite(adam_best["final_batch_loss"]))
-            self.assertGreater(adam_best["final_epoch"], 0.0)
-            self.assertGreater(adam_best["training_time_seconds"], 0.0)
-            self.assertGreater(adam_best["seconds_per_step"], 0.0)
-            self.assertGreater(adam_best["tokens_per_second"], 0.0)
+    def test_cifar10_mlp_sp_accepts_manifold_methods_and_rejects_muon(self):
+        args = cifar10_mlp_sp_benchmark.parse_args(
+            [
+                "--methods",
+                "manifold",
+                "manifold_online",
+                "manifold_admm",
+            ]
+        )
+        self.assertEqual(args.methods, ["manifold", "manifold_online", "manifold_admm"])
 
-            adamw_best = payload["methods"]["adamw"]["policies"]["none"]["best"]
-            self.assertTrue(math.isfinite(adamw_best["train_loss"]))
-            self.assertTrue(math.isfinite(adamw_best["val_loss"]))
-            self.assertTrue(math.isfinite(adamw_best["final_batch_loss"]))
-            self.assertGreater(adamw_best["final_epoch"], 0.0)
-            self.assertGreater(adamw_best["training_time_seconds"], 0.0)
-            self.assertGreater(adamw_best["seconds_per_step"], 0.0)
-            self.assertGreater(adamw_best["tokens_per_second"], 0.0)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cifar10_mlp_sp_benchmark.parse_args(["--methods", "muon"])
 
-            for method in ("manifold_online", "manifold_admm"):
-                policies = payload["methods"][method]["policies"]
-                self.assertEqual(policies["none"]["runs"], [])
-                for policy in ("mlp_only",):
-                    best = policies[policy]["best"]
-                    self.assertTrue(math.isfinite(best["train_loss"]))
-                    self.assertTrue(math.isfinite(best["val_loss"]))
-                    self.assertTrue(math.isfinite(best["final_batch_loss"]))
-                    self.assertGreater(best["final_epoch"], 0.0)
-                    self.assertGreater(best["training_time_seconds"], 0.0)
-                    self.assertGreater(best["seconds_per_step"], 0.0)
-                    self.assertGreater(best["tokens_per_second"], 0.0)
-                    self.assertTrue(math.isfinite(best["stiefel_deviation_mean"]))
-                    self.assertTrue(math.isfinite(best["stiefel_deviation_max"]))
-                    self.assertGreaterEqual(best["stiefel_deviation_mean"], 0.0)
-                    self.assertGreaterEqual(best["stiefel_deviation_max"], 0.0)
+    def test_cifar10_mlp_sp_manifold_smoke_uses_unit_stiefel_without_scaling(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            results_path = tmp_path / "cifar10_mlp_sp_manifold_results.json"
+            plots_dir = tmp_path / "plots"
 
+            cifar10_mlp_sp_benchmark.main(
+                [
+                    "--smoke-test",
+                    "--synthetic-data",
+                    "--steps",
+                    "2",
+                    "--learning-rates",
+                    "1e-2",
+                    "--hidden-sizes",
+                    "16",
+                    "--methods",
+                    "manifold",
+                    "--manifold-scaling",
+                    "fan_max",
+                    "--results-path",
+                    str(results_path),
+                    "--plots-dir",
+                    str(plots_dir),
+                ]
+            )
+
+            payload = json.loads(results_path.read_text())
+            best = payload["methods"]["manifold"]["best"]
+            self.assertEqual(best["parameterization"], "unit_stiefel")
+            self.assertEqual(best["linear_normalization"], "unit_stiefel")
+            self.assertEqual(best["effective_manifold_scaling"], "none")
+            self.assertEqual(best["head_adam_update_scale"], 1.0)
 
 if __name__ == "__main__":
     unittest.main()

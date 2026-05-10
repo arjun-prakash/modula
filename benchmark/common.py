@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,10 +15,13 @@ import optax
 from tqdm import tqdm
 
 from examples.data.cifar10 import load_cifar10
-from examples.data.cifar100 import load_cifar100
-from modula.atom import Conv2D, Linear, RMSRadiusLinear, StandardParamLinear
-from modula.bond import Flatten, MaxPool2D, ReLU
-from modula.manifold import matrix_sign
+from benchmark.scaling import (
+    SCALING_CHOICES,
+    iter_weighted_atoms,
+    manifold_directions,
+    muon_directions,
+)
+from modula.atom import Linear
 
 MANIFOLD_METHODS = ("manifold", "manifold_online", "manifold_admm")
 METHOD_CHOICES = (
@@ -27,17 +31,9 @@ METHOD_CHOICES = (
     "muon",
     *MANIFOLD_METHODS,
 )
-MUON_SCALING_CHOICES = ("fan_ratio", "fan_max", "none")
+MUON_SCALING_CHOICES = SCALING_CHOICES
 LOSS_CHOICES = ("cross_entropy", "mse")
-LINEAR_NORMALIZATION_CHOICES = (
-    "unit_stiefel",
-    "unit_stiefel_none",
-    "unit_stiefel_fan_ratio",
-    "rms_radius",
-    "sp",
-)
-FEATURE_DIM = 4 * 4 * 128
-MLP_FEATURE_DIM = 64
+CIFAR_NORMALIZATION_CHOICES = ("minus_one_one", "zero_one")
 
 
 @dataclass
@@ -86,7 +82,20 @@ def add_common_arguments(
         help="Learning rates to sweep",
     )
     parser.add_argument("--steps", type=int, default=default_steps, help="Training steps per learning rate")
+    parser.add_argument(
+        "--epochs",
+        type=float,
+        default=None,
+        help="Training epochs per learning rate; overrides --steps when set",
+    )
     parser.add_argument("--batch-size", type=int, default=default_batch_size, help="Mini-batch size")
+    parser.add_argument(
+        "--cifar-normalization",
+        type=str,
+        default="minus_one_one",
+        choices=CIFAR_NORMALIZATION_CHOICES,
+        help="CIFAR input normalization; minus_one_one matches torchvision Normalize((0.5,), (0.5,))",
+    )
     parser.add_argument("--eval-every", type=int, default=default_eval_every, help="Metric logging interval")
     parser.add_argument(
         "--loss",
@@ -107,6 +116,12 @@ def add_common_arguments(
         type=float,
         default=0.01,
         help="Decoupled weight decay for AdamW baseline",
+    )
+    parser.add_argument(
+        "--sgd-momentum",
+        type=float,
+        default=0.9,
+        help="Momentum coefficient for SGD baseline",
     )
     parser.add_argument("--dual-alpha", type=float, default=2e-5, help="Alpha for manifold_online")
     parser.add_argument("--dual-beta", type=float, default=0.9, help="Beta for manifold_online")
@@ -194,6 +209,13 @@ def add_common_arguments(
     return parser
 
 
+def validate_common_arguments(parser: argparse.ArgumentParser, args) -> None:
+    if args.epochs is not None and args.epochs <= 0.0:
+        parser.error("--epochs must be positive")
+    if args.sgd_momentum < 0.0:
+        parser.error("--sgd-momentum must be nonnegative")
+
+
 def apply_smoke_test_overrides(args) -> None:
     if not args.smoke_test:
         return
@@ -202,6 +224,15 @@ def apply_smoke_test_overrides(args) -> None:
     args.batch_size = min(int(args.batch_size), 8)
     args.eval_every = 1
     args.eval_train_samples = 16 if int(args.eval_train_samples) == 0 else min(int(args.eval_train_samples), 16)
+
+
+def resolve_training_steps(args, dataset: DatasetBundle) -> None:
+    if args.epochs is None:
+        return
+
+    train_size = int(dataset.train_inputs.shape[0])
+    batch_size = int(args.batch_size)
+    args.steps = max(1, int(math.ceil(float(args.epochs) * train_size / batch_size)))
 
 
 def _synthetic_split(num_examples: int, num_classes: int, rng: np.random.Generator):
@@ -225,7 +256,14 @@ def _synthetic_split(num_examples: int, num_classes: int, rng: np.random.Generat
     return images, labels
 
 
-def _make_synthetic_dataset(name: str, num_classes: int, *, smoke_test: bool, seed: int) -> DatasetBundle:
+def _make_synthetic_dataset(
+    name: str,
+    num_classes: int,
+    *,
+    smoke_test: bool,
+    seed: int,
+    cifar_normalization: str,
+) -> DatasetBundle:
     train_size = 64 if smoke_test else 256
     test_size = 32 if smoke_test else 128
     rng = np.random.default_rng(seed)
@@ -234,27 +272,46 @@ def _make_synthetic_dataset(name: str, num_classes: int, *, smoke_test: bool, se
     return DatasetBundle(
         name=name,
         num_classes=num_classes,
-        train_inputs=jnp.asarray(train_images, dtype=jnp.float32),
+        train_inputs=normalize_cifar_images(train_images, normalization=cifar_normalization),
         train_targets=one_hot(jnp.asarray(train_labels, dtype=jnp.int32), num_classes),
         train_labels=jnp.asarray(train_labels, dtype=jnp.int32),
-        test_inputs=jnp.asarray(test_images, dtype=jnp.float32),
+        test_inputs=normalize_cifar_images(test_images, normalization=cifar_normalization),
         test_targets=one_hot(jnp.asarray(test_labels, dtype=jnp.int32), num_classes),
         test_labels=jnp.asarray(test_labels, dtype=jnp.int32),
     )
 
 
-def prepare_dataset(dataset_name: str, *, synthetic_data: bool = False, smoke_test: bool = False, seed: int = 0):
+def normalize_cifar_images(images, *, normalization: str):
+    images = jnp.asarray(images, dtype=jnp.float32)
+    if normalization == "zero_one":
+        return images
+    if normalization == "minus_one_one":
+        return 2.0 * images - 1.0
+    raise ValueError(f"Unknown CIFAR normalization: {normalization}")
+
+
+def prepare_dataset(
+    dataset_name: str,
+    *,
+    synthetic_data: bool = False,
+    smoke_test: bool = False,
+    seed: int = 0,
+    cifar_normalization: str = "minus_one_one",
+):
     if dataset_name == "cifar10":
         loader = load_cifar10
         num_classes = 10
-    elif dataset_name == "cifar100":
-        loader = load_cifar100
-        num_classes = 100
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
 
     if synthetic_data:
-        return _make_synthetic_dataset(dataset_name, num_classes, smoke_test=smoke_test, seed=seed)
+        return _make_synthetic_dataset(
+            dataset_name,
+            num_classes,
+            smoke_test=smoke_test,
+            seed=seed,
+            cifar_normalization=cifar_normalization,
+        )
 
     train_images, train_labels, test_images, test_labels = loader(normalize=True)
     train_labels = jnp.asarray(train_labels, dtype=jnp.int32)
@@ -263,10 +320,10 @@ def prepare_dataset(dataset_name: str, *, synthetic_data: bool = False, smoke_te
     return DatasetBundle(
         name=dataset_name,
         num_classes=num_classes,
-        train_inputs=jnp.asarray(train_images, dtype=jnp.float32),
+        train_inputs=normalize_cifar_images(train_images, normalization=cifar_normalization),
         train_targets=one_hot(train_labels, num_classes),
         train_labels=train_labels,
-        test_inputs=jnp.asarray(test_images, dtype=jnp.float32),
+        test_inputs=normalize_cifar_images(test_images, normalization=cifar_normalization),
         test_targets=one_hot(test_labels, num_classes),
         test_labels=test_labels,
     )
@@ -278,98 +335,6 @@ def get_batch(key, X, y, batch_size):
     replace = X.shape[0] < batch_size
     idx = jax.random.choice(key, X.shape[0], shape=(batch_size,), replace=replace)
     return X[idx], y[idx]
-
-
-def build_cifar_trunk():
-    trunk = Flatten()
-    trunk @= MaxPool2D(pool_size=2)
-    trunk @= ReLU() @ Conv2D(64, 128, kernel_size=3)
-    trunk @= MaxPool2D(pool_size=2)
-    trunk @= ReLU() @ Conv2D(32, 64, kernel_size=3)
-    trunk @= MaxPool2D(pool_size=2)
-    trunk @= ReLU() @ Conv2D(3, 32, kernel_size=3)
-    trunk.jit()
-    return trunk
-
-
-def build_classifier_head(num_classes: int):
-    head = Linear(num_classes, FEATURE_DIM)
-    head.jit()
-    return head
-
-
-def _linear_atom_for_normalization(linear_normalization: str):
-    if linear_normalization == "sp":
-        return StandardParamLinear
-    if linear_normalization == "rms_radius":
-        return RMSRadiusLinear
-    if linear_normalization in ("unit_stiefel", "unit_stiefel_none", "unit_stiefel_fan_ratio"):
-        return Linear
-    raise ValueError(f"Unknown linear normalization: {linear_normalization}")
-
-
-def build_mlp_trunk(hidden_size: int = MLP_FEATURE_DIM, *, linear_normalization: str = "unit_stiefel"):
-    linear_cls = _linear_atom_for_normalization(linear_normalization)
-    trunk = ReLU() @ linear_cls(hidden_size, hidden_size)
-    trunk @= ReLU() @ linear_cls(hidden_size, 32 * 32 * 3)
-    trunk @= Flatten()
-    trunk.jit()
-    return trunk
-
-
-def build_wide3_mlp_trunk(hidden_size: int = MLP_FEATURE_DIM, *, linear_normalization: str = "unit_stiefel"):
-    linear_cls = _linear_atom_for_normalization(linear_normalization)
-    trunk = ReLU() @ linear_cls(4 * hidden_size, hidden_size)
-    trunk @= ReLU() @ linear_cls(hidden_size, 4 * hidden_size)
-    trunk @= ReLU() @ linear_cls(4 * hidden_size, 32 * 32 * 3)
-    trunk @= Flatten()
-    trunk.jit()
-    return trunk
-
-
-def build_mlp_classifier_head(
-    num_classes: int,
-    feature_dim: int = MLP_FEATURE_DIM,
-    *,
-    linear_normalization: str = "unit_stiefel",
-):
-    linear_cls = _linear_atom_for_normalization(linear_normalization)
-    head = linear_cls(num_classes, feature_dim)
-    head.jit()
-    return head
-
-
-def build_cifar_models(num_classes: int):
-    return build_cifar_trunk(), build_classifier_head(num_classes)
-
-
-def build_cifar_mlp_models(
-    num_classes: int,
-    hidden_size: int = MLP_FEATURE_DIM,
-    trunk: str = "default",
-    *,
-    linear_normalization: str = "unit_stiefel",
-):
-    head_linear_normalization = "sp" if linear_normalization == "sp" else "unit_stiefel"
-    if trunk == "default":
-        return build_mlp_trunk(
-            hidden_size,
-            linear_normalization=linear_normalization,
-        ), build_mlp_classifier_head(
-            num_classes,
-            hidden_size,
-            linear_normalization=head_linear_normalization,
-        )
-    if trunk == "wide3":
-        return build_wide3_mlp_trunk(
-            hidden_size,
-            linear_normalization=linear_normalization,
-        ), build_mlp_classifier_head(
-            num_classes,
-            4 * hidden_size,
-            linear_normalization=head_linear_normalization,
-        )
-    raise ValueError(f"Unknown CIFAR MLP trunk: {trunk}")
 
 
 def make_predict_fn(trunk, head):
@@ -385,102 +350,26 @@ def tree_l2_norm(tree) -> float:
 
 
 def _iter_weighted_atoms(module) -> List[Any]:
-    atoms = int(getattr(module, "atoms", 0) or 0)
-    if atoms == 0:
-        return []
-
-    children = getattr(module, "children", ())
-    if not children:
-        return [module]
-
-    ordered_atoms: List[Any] = []
-    for child in children:
-        ordered_atoms.extend(_iter_weighted_atoms(child))
-    return ordered_atoms
-
-
-def _manifold_update_scale(atom, *, scaling: str = "fan_ratio") -> float:
-    if scaling == "none":
-        return 1.0
-    if scaling == "fan_ratio":
-        if isinstance(atom, Conv2D):
-            return float((atom.k ** 2) * np.sqrt(atom.d_out / atom.d_in))
-        if isinstance(atom, Linear):
-            return float(np.sqrt(atom.fanout / atom.fanin))
-        raise ValueError(f"Unsupported manifold benchmark atom type: {type(atom).__name__}")
-    if scaling != "fan_max":
-        raise ValueError(f"Unknown manifold scaling: {scaling}")
-
-    if isinstance(atom, Conv2D):
-        return float((atom.k ** 2) * np.sqrt(max(atom.d_in, atom.d_out)))
-    if isinstance(atom, Linear):
-        return float(np.sqrt(max(atom.fanin, atom.fanout)))
-    raise ValueError(f"Unsupported manifold benchmark atom type: {type(atom).__name__}")
-
-
-def _muon_update_scale(atom, *, scaling: str) -> float:
-    if scaling == "none":
-        return 1.0
-    if scaling == "fan_ratio":
-        return _manifold_update_scale(atom)
-    if scaling != "fan_max":
-        raise ValueError(f"Unknown Muon scaling: {scaling}")
-
-    if isinstance(atom, Conv2D):
-        return float((atom.k ** 2) * np.sqrt(max(atom.d_in, atom.d_out)))
-    if isinstance(atom, Linear):
-        return float(np.sqrt(max(atom.fanin, atom.fanout)))
-    raise ValueError(f"Unsupported Muon benchmark atom type: {type(atom).__name__}")
+    return iter_weighted_atoms(module)
 
 
 def _manifold_directions(module, tangents, *, scaling: str):
-    atoms = _iter_weighted_atoms(module)
-
-    if len(atoms) != len(tangents):
-        raise ValueError(f"Mismatch between atom metadata ({len(atoms)}) and tangents ({len(tangents)})")
-
-    directions = []
-    for atom, tangent in zip(atoms, tangents):
-        scale = _manifold_update_scale(atom, scaling=scaling)
-        directions.append(jnp.asarray(scale, dtype=tangent.dtype) * tangent)
-    return directions
-
-
-def _muon_direction(atom, grad):
-    if isinstance(atom, Conv2D):
-        grad_flat = atom._flatten_kernel(grad)
-        direction_flat = matrix_sign(grad_flat)
-        return atom._reshape_kernel(direction_flat)
-    if isinstance(atom, Linear):
-        return matrix_sign(grad)
-    raise ValueError(f"Unsupported Muon benchmark atom type: {type(atom).__name__}")
+    return manifold_directions(module, tangents, scaling=scaling)
 
 
 def _muon_directions(module, grads, *, scaling: str):
-    atoms = _iter_weighted_atoms(module)
-
-    if len(atoms) != len(grads):
-        raise ValueError(f"Mismatch between atom metadata ({len(atoms)}) and gradients ({len(grads)})")
-
-    directions = []
-    for atom, grad in zip(atoms, grads):
-        direction = _muon_direction(atom, grad)
-        scale = _muon_update_scale(atom, scaling=scaling)
-        directions.append(jnp.asarray(scale, dtype=direction.dtype) * direction)
-    return directions
+    return muon_directions(module, grads, scaling=scaling)
 
 
 def _weight_to_stiefel_matrix(atom, weight):
     array = jnp.asarray(weight, dtype=jnp.float32)
-    if isinstance(atom, Conv2D):
-        return atom._flatten_kernel(array)
     if isinstance(atom, Linear):
         return array
     return None
 
 
 def _stiefel_target_scale(atom):
-    if isinstance(atom, (Conv2D, Linear)):
+    if isinstance(atom, Linear):
         radius = float(getattr(atom, "stiefel_radius", 1.0))
         return jnp.asarray(radius, dtype=jnp.float32)
     return None
@@ -570,6 +459,27 @@ def compute_accuracy(predict_fn, trunk_weights, head_weights, inputs, labels, *,
     return 100.0 * correct / total
 
 
+def compute_mean_loss(
+    predict_fn,
+    loss_fn,
+    trunk_weights,
+    head_weights,
+    inputs,
+    targets,
+    *,
+    batch_size: int = 1024,
+) -> float:
+    total = inputs.shape[0]
+    weighted_loss = 0.0
+
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
+        batch_loss = loss_fn(predict_fn, trunk_weights, head_weights, inputs[start:end], targets[start:end])
+        weighted_loss += float(batch_loss) * (end - start)
+
+    return weighted_loss / total
+
+
 def _mse_loss_fn(predict_fn, trunk_weights, head_weights, inputs, targets):
     logits = predict_fn(trunk_weights, head_weights, inputs)
     return jnp.mean((logits - targets) ** 2)
@@ -586,6 +496,47 @@ def _resolve_loss_fn(loss: str):
     if loss == "mse":
         return _mse_loss_fn
     raise ValueError(f"Unknown loss: {loss}")
+
+
+def _scale_update_tree(updates, scale: float):
+    return jax.tree_util.tree_map(
+        lambda update: jnp.asarray(scale, dtype=update.dtype) * update,
+        updates,
+    )
+
+
+def _decoupled_weight_decay_updates(params, *, learning_rate: float, weight_decay: float):
+    return jax.tree_util.tree_map(
+        lambda param: -jnp.asarray(learning_rate * weight_decay, dtype=param.dtype) * param,
+        params,
+    )
+
+
+def _scaled_head_optimizer_update(
+    method: str,
+    head_optimizer,
+    head_opt_state,
+    head_grads,
+    head_weights,
+    *,
+    learning_rate: float,
+    adam_weight_decay: float,
+    head_adam_update_scale: float,
+):
+    head_updates, head_opt_state = head_optimizer.update(head_grads, head_opt_state, params=head_weights)
+    if method == "sgd":
+        return head_updates, head_opt_state
+
+    scaled_head_updates = _scale_update_tree(head_updates, head_adam_update_scale)
+    if method != "adamw":
+        return scaled_head_updates, head_opt_state
+
+    decay_updates = _decoupled_weight_decay_updates(
+        head_weights,
+        learning_rate=learning_rate,
+        weight_decay=adam_weight_decay,
+    )
+    return jax.tree_util.tree_map(lambda update, decay: update + decay, scaled_head_updates, decay_updates), head_opt_state
 
 
 def train_single_run(
@@ -611,24 +562,25 @@ def train_single_run(
     muon_scaling: str = "fan_ratio",
     muon_momentum: float = 0.9,
     muon_weight_decay: float = 0.01,
+    sgd_momentum: float = 0.9,
     loss: str = "cross_entropy",
     logger=None,
     show_progress: bool = True,
     project_trunk_after_update: bool = False,
+    head_adam_update_scale: float = 1.0,
+    head_init_scale: float = 1.0,
 ):
     key = jax.random.PRNGKey(seed)
     key, trunk_key, head_key = jax.random.split(key, 3)
 
     trunk_weights = trunk.initialize(trunk_key)
-    head_weights = head.initialize(head_key)
+    head_weights = _scale_update_tree(head.initialize(head_key), head_init_scale)
     predict_fn = make_predict_fn(trunk, head)
     loss_fn = _resolve_loss_fn(loss)
     loss_and_grad = jax.jit(jax.value_and_grad(lambda tw, hw, x, y: loss_fn(predict_fn, tw, hw, x, y), argnums=(0, 1)))
 
     if method == "sgd":
-        head_optimizer = optax.sgd(learning_rate)
-    elif method == "adamw":
-        head_optimizer = optax.adamw(learning_rate, weight_decay=adam_weight_decay)
+        head_optimizer = optax.sgd(learning_rate, momentum=sgd_momentum)
     else:
         head_optimizer = optax.adam(learning_rate)
     head_opt_state = head_optimizer.init(head_weights)
@@ -642,7 +594,7 @@ def train_single_run(
         trunk_optimizer = optax.adamw(learning_rate, weight_decay=adam_weight_decay)
         trunk_opt_state = trunk_optimizer.init(trunk_weights)
     elif method == "sgd":
-        trunk_optimizer = optax.sgd(learning_rate)
+        trunk_optimizer = optax.sgd(learning_rate, momentum=sgd_momentum)
         trunk_opt_state = trunk_optimizer.init(trunk_weights)
 
     dual_state = trunk.init_dual_state(trunk_weights) if method == "manifold_online" else None
@@ -658,7 +610,16 @@ def train_single_run(
         loss_value, (trunk_grads, head_grads) = loss_and_grad(trunk_weights, head_weights, batch_inputs, batch_targets)
         last_loss = float(loss_value)
 
-        head_updates, head_opt_state = head_optimizer.update(head_grads, head_opt_state, params=head_weights)
+        head_updates, head_opt_state = _scaled_head_optimizer_update(
+            method,
+            head_optimizer,
+            head_opt_state,
+            head_grads,
+            head_weights,
+            learning_rate=learning_rate,
+            adam_weight_decay=adam_weight_decay,
+            head_adam_update_scale=head_adam_update_scale,
+        )
         head_weights = optax.apply_updates(head_weights, head_updates)
 
         if method in ("adam", "adamw", "sgd"):
@@ -794,13 +755,23 @@ def train_single_run(
         dataset.test_inputs,
         dataset.test_labels,
     )
+    full_train_loss = compute_mean_loss(
+        predict_fn,
+        loss_fn,
+        trunk_weights,
+        head_weights,
+        dataset.train_inputs,
+        dataset.train_targets,
+    )
 
     final_geometry_metrics = compute_trunk_geometry_metrics(trunk, trunk_weights)
     result = {
         "train_accuracy": float(final_train_accuracy),
         "test_accuracy": float(final_test_accuracy),
         "final_loss": float(last_loss),
+        "full_train_loss": float(full_train_loss),
         "loss_name": loss,
+        "steps": int(steps),
         "final_epoch": float(final_epoch),
         "training_time_seconds": float(elapsed_time),
         "seconds_per_step": float(elapsed_time / max(steps, 1)),
@@ -828,12 +799,15 @@ def make_run_config(
         "method": method,
         "learning_rate": float(learning_rate),
         "steps": int(args.steps),
+        "epochs": float(args.epochs) if args.epochs is not None else None,
         "batch_size": int(args.batch_size),
+        "cifar_normalization": str(args.cifar_normalization),
         "eval_every": int(args.eval_every),
         "loss": str(args.loss),
         "eval_train_samples": int(args.eval_train_samples),
         "seed": int(args.seed),
         "adam_weight_decay": float(args.adam_weight_decay),
+        "sgd_momentum": float(args.sgd_momentum),
         "dual_alpha": float(args.dual_alpha),
         "dual_beta": float(args.dual_beta),
         "admm_steps": int(args.admm_steps),
@@ -854,6 +828,8 @@ def make_run_config(
         config["trunk"] = str(args.trunk)
     if hasattr(args, "linear_normalizations"):
         config["linear_normalizations"] = list(args.linear_normalizations)
+    if hasattr(args, "mup_base_width"):
+        config["mup_base_width"] = int(args.mup_base_width)
     return config
 
 
@@ -863,12 +839,15 @@ def make_results_config(args, *, dataset_name: str, num_classes: int) -> Dict[st
         "num_classes": int(num_classes),
         "learning_rates": [float(rate) for rate in args.learning_rates],
         "steps": int(args.steps),
+        "epochs": float(args.epochs) if args.epochs is not None else None,
         "batch_size": int(args.batch_size),
+        "cifar_normalization": str(args.cifar_normalization),
         "eval_every": int(args.eval_every),
         "loss": str(args.loss),
         "eval_train_samples": int(args.eval_train_samples),
         "seed": int(args.seed),
         "adam_weight_decay": float(args.adam_weight_decay),
+        "sgd_momentum": float(args.sgd_momentum),
         "dual_alpha": float(args.dual_alpha),
         "dual_beta": float(args.dual_beta),
         "admm_steps": int(args.admm_steps),
@@ -890,6 +869,8 @@ def make_results_config(args, *, dataset_name: str, num_classes: int) -> Dict[st
         config["trunk"] = str(args.trunk)
     if hasattr(args, "linear_normalizations"):
         config["linear_normalizations"] = list(args.linear_normalizations)
+    if hasattr(args, "mup_base_width"):
+        config["mup_base_width"] = int(args.mup_base_width)
     return config
 
 
@@ -1051,6 +1032,7 @@ def print_run_summary(method: str, run_result: Mapping[str, Any]) -> None:
         f"train acc={run_result['train_accuracy']:.2f}% | "
         f"test acc={run_result['test_accuracy']:.2f}% | "
         f"loss={run_result['final_loss']:.4f} | "
+        f"full train loss={run_result['full_train_loss']:.4f} | "
         f"epoch={run_result['final_epoch']:.2f} | "
         f"time={run_result['training_time_seconds']:.2f}s"
     )
