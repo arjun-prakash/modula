@@ -1,106 +1,98 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/modula.svg">
-  <source media="(prefers-color-scheme: light)" srcset="assets/modula_light.svg">
-  <img alt="modula logo" src="assets/modula.svg">
-</picture>
+# Modula CIFAR-10 MLP Benchmarks
 
-Modula is a deep learning library and a deep learning theory built hand-in-hand. Modula disentangles complex neural networks and turns them into structured mathematical objects called modules. This makes training faster and easier to scale, while also providing tools for understanding the properties of the trained network. Modula is built on top of [JAX](https://github.com/google/jax). More information is available in the [Modula docs](https://docs.modula.systems).
+This repository contains two CIFAR-10 MLP benchmark entrypoints built on top of
+the Modula framework:
 
-# Installation
+- `benchmark/cifar10_mlp_sp.py`: standard-parameterization MLP trained with SGD.
+- `benchmark/cifar10_mlp_mup.py`: muP-style Modula MLP trained with the manifold update.
 
-Modula can be installed using pip:
+The first non-synthetic run downloads CIFAR-10 into `benchmark/cifar10_files/`.
+Benchmark summaries are written as JSON files under `results/` by default.
 
-```bash
-pip install git+https://github.com/modula-systems/modula.git
-```
+## Setup
 
-Or you can clone the repository and install locally:
+Create an environment and install the repository in editable mode:
 
 ```bash
-uv init project_name
-git clone https://github.com/modula-systems/modula.git
-cd modula
-uv pip install -e .
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
 ```
 
-# Functionality
+If your machine needs a specific JAX build for CUDA, install the appropriate JAX
+wheel for your system before running the benchmarks.
 
-Modula provides a set of architecture-specific helper functions that are automatically constructed along with the network architecture itself. As an example, let’s build a multi-layer perceptron:
+## Run SP
 
-```python
-from modula.atom import Linear
-from modula.bond import ReLU
-
-mlp = Linear(10, 256)
-mlp @= ReLU()
-mlp @= Linear(256, 256)
-mlp @= ReLU()
-mlp @= Linear(256, 784)
-
-mlp.jit() # makes everything run faster
-```
-
-Behind the scenes, Modula builds a function to randomly initialize the weights of the network:
-
-```python
-import jax
-
-key = jax.random.PRNGKey(0)
-weights = mlp.initialize(key)
-```
-
-Supposing we have used JAX to compute the gradient of our loss and stored this as `grad`, then we can use Modula to dualize the gradient, thereby accelerating our gradient descent training:
-
-```python
-dualized_grad = mlp.dualize(grad)
-weights = [w - 0.1 * dg for w, dg in zip(weights, dualized_grad)]
-```
-
-And after the weight update, we can project the weights back to their natural constraint set:
-
-```python
-weights = mlp.project(weights)
-```
-
-In short, Modula lets us think about the weight space of our neural network as a somewhat classical optimization space, complete with duality and projection operations.
-
-# CIFAR-10 MLP runs
-
-This repository includes two small benchmark entrypoints for CIFAR-10 MLP runs:
+Run the standard-parameterization baseline:
 
 ```bash
-python benchmark/cifar10_mlp_sp.py --steps 4000 --learning-rate 0.1 --hidden-size 64
-python benchmark/cifar10_mlp_mup.py --steps 4000 --learning-rate 0.01 --hidden-size 64
+python benchmark/cifar10_mlp_sp.py \
+  --steps 4000 \
+  --learning-rate 0.1 \
+  --hidden-size 64 \
+  --output results/cifar10_mlp_sp.json
 ```
 
-The SP entrypoint uses standard-parameterization linear layers. The muP entrypoint uses RMS-radius trunk layers with a unit-Stiefel readout and applies the muP readout scaling from `--mup-base-width`.
+Useful flags:
 
-# References
+- `--steps`: number of training steps.
+- `--learning-rate`: SGD learning rate.
+- `--hidden-size`: width of both hidden layers.
+- `--batch-size`: mini-batch size.
+- `--eval-every`: progress update interval.
+- `--seed`: PRNG seed.
+- `--output`: JSON output path.
 
-Modula is based on two papers. The first is on the [modular norm](https://arxiv.org/abs/2405.14813):
+## Run muP
 
-```bibtex
-@inproceedings{modular-norm,
-  title     = {Scalable Optimization in the Modular Norm},
-  author    = {Tim Large and Yang Liu and Minyoung Huh and Hyojin Bahng and Phillip Isola and Jeremy Bernstein},
-  booktitle = {Neural Information Processing Systems},
-  year      = {2024}
-}
+Run the muP-style Modula benchmark:
+
+```bash
+python benchmark/cifar10_mlp_mup.py \
+  --steps 4000 \
+  --learning-rate 0.01 \
+  --hidden-size 64 \
+  --mup-base-width 256 \
+  --output results/cifar10_mlp_mup.json
 ```
 
-And the second is on [modular duality](https://arxiv.org/abs/2410.21265):
+Useful flags:
 
-```bibtex
-@article{modular-duality,
-  title   = {Modular Duality in Deep Learning},
-  author  = {Jeremy Bernstein and Laker Newhouse},
-  journal = {arXiv:2410.21265},
-  year    = {2024}
-}
-```
+- `--steps`: number of training steps.
+- `--learning-rate`: manifold-update learning rate.
+- `--hidden-size`: width of both hidden layers.
+- `--mup-base-width`: base width used for readout initialization and update scaling.
+- `--batch-size`: mini-batch size.
+- `--eval-every`: progress update interval.
+- `--seed`: PRNG seed.
+- `--output`: JSON output path.
 
-## Acknowledgements
-We originally wrote Modula on top of PyTorch, but I ported the project over to JAX inspired by Jack Gallagher's [modulax](https://github.com/GallagherCommaJack/modulax).
+## Outputs
+
+Each script prints a one-line run summary and writes a JSON payload with:
+
+- run configuration,
+- train and test accuracy,
+- final mini-batch loss,
+- full-train loss,
+- runtime metrics,
+- trunk geometry diagnostics.
+
+## Credit
+
+The benchmark code uses the Modula framework and its JAX implementation of
+modules, atoms, bonds, duality, and projection/retraction operations. Modula is
+based on:
+
+- Tim Large, Yang Liu, Minyoung Huh, Hyojin Bahng, Phillip Isola, and Jeremy
+  Bernstein, "Scalable Optimization in the Modular Norm", NeurIPS 2024.
+- Jeremy Bernstein and Laker Newhouse, "Modular Duality in Deep Learning",
+  arXiv:2410.21265.
+
+The original Modula project and documentation are available at
+https://github.com/modula-systems/modula and https://docs.modula.systems.
 
 ## License
-Modula is released under an [MIT license](/LICENSE).
+
+This repository is released under the MIT license in `LICENSE`.
