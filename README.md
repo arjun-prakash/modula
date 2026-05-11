@@ -62,25 +62,18 @@ And after the weight update, we can project the weights back to their natural co
 weights = mlp.project(weights)
 ```
 
-Also added online_manifold (for linear layers):
-```
-  dual_alpha = 2e-5
-  dual_beta = 0.9
-  dual_state = model.init_dual_state(weights) 
-
-  tangents, dual_state = model.online_dual_ascent(
-                    dual_state,
-                    weights,
-                    grad_weights,
-                    target_norm=1,
-                    alpha=dual_alpha,
-                    beta=dual_beta,
-                )
-  weights = [w - learning_rate * t for w, t in zip(weights, tangents)]
-  weights = model.retract(weights)
-```
-
 In short, Modula lets us think about the weight space of our neural network as a somewhat classical optimization space, complete with duality and projection operations.
+
+# CIFAR-10 MLP runs
+
+This repository includes two small benchmark entrypoints for CIFAR-10 MLP runs:
+
+```bash
+python benchmark/cifar10_mlp_sp.py --steps 4000 --learning-rate 0.1 --hidden-size 64
+python benchmark/cifar10_mlp_mup.py --steps 4000 --learning-rate 0.01 --hidden-size 64
+```
+
+The SP entrypoint uses standard-parameterization linear layers. The muP entrypoint uses RMS-radius trunk layers with a unit-Stiefel readout and applies the muP readout scaling from `--mup-base-width`.
 
 # References
 

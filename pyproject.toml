@@ -10,27 +10,22 @@ authors = [
 ]
 description = "Numerically sound neural network library."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License", 
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "jax[cuda12]>=0.4.30",
-    "matplotlib>=3.9.4",
+    "jax>=0.4.30",
+    "numpy>=1.26",
     "optax>=0.2.4",
-    "pyflyt>=0.21.0",
-    "scipy>=1.13.1",
-    "torch>=2.8.0",
-    "torchvision>=0.23.0",
     "tqdm>=4.67.1",
-    "wandb>=0.22.0",
 ]
 
 
-[tool.setuptools]
-packages = ["modula"]
+[tool.setuptools.packages.find]
+include = ["modula*", "benchmark*"]
 
 [project.urls]
 "Homepage" = "https://modula.systems/"

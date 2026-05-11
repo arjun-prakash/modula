@@ -2,13 +2,10 @@
 
 modula.egg-info/
 modula/__pycache__/
-examples/__pycache__/
-
-examples/.ipynb_checkpoints/
-examples/data/*
-!examples/data/*.py
+benchmark/cifar10_files/
 
 models/
+results/
 
 paper/
 slurm_logs/
@@ -23,6 +20,5 @@ wandb/
 .venv/
 
 plots/
-
 AGENTS.md
 .codex

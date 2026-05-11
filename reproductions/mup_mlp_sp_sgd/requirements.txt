@@ -1,4 +1,0 @@
-mup
-torch
-torchvision
-
